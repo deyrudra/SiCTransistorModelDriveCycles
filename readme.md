@@ -1,0 +1,3 @@
+ This github repo contains a driving-twin simulator for the purposes of capturing drive cycles that contain data about Silicon Carbide transistor's temperature.
+ 
+ This data will then be used to evalaute the damage on those transistors, the reason of which will be represented by the behaviour of a vehicle (which can be found in the Drive Cycles). A potentional usage case could be to use this new found information to find paths that go from A to B in a particular city, that minimize the damage on those traction inverter's transistors.
