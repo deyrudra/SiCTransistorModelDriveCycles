@@ -1564,6 +1564,18 @@ class TrafficVisualizer:
                 f"Ego progress  {ego.progress * 100.0:7.1f}%",
             ]
 
+            if ego.last_dynamics is not None:
+                dyn = ego.last_dynamics
+                lines += [
+                    f"Wheel power   {dyn.actual_wheel_power_w / 1000.0:7.1f} kW",
+                    f"DC power      {dyn.dc_power_w / 1000.0:7.1f} kW",
+                ]
+
+                if dyn.propulsion_power_limited:
+                    lines += ["Power limit   PROPULSION"]
+                elif dyn.regen_power_limited:
+                    lines += ["Power limit   REGEN/friction"]
+
             if self.drive_cycle_recorder is not None:
                 recorder = self.drive_cycle_recorder
                 state = "saved" if recorder.saved else "recording"
@@ -1655,9 +1667,18 @@ class TrafficVisualizer:
 
                 if self.ego_vehicle is not None:
                     ego_dt = dt * self.simulation.speed
-                    self.ego_vehicle.update(ego_dt)
+
+                    self.current_grade_deg = self.ego_grade_deg()
+
+                    self.ego_vehicle.update(
+                        ego_dt,
+                        grade_deg=self.current_grade_deg,
+                    )
+
                     self.ego_sim_time_s += ego_dt
 
+                    # Refresh after movement in case the ego crossed onto
+                    # another road segment during this step.
                     self.current_grade_deg = self.ego_grade_deg()
 
                     if self.drive_cycle_recorder is not None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Optional
 
 from drive_cycles.vehicle_config import VehicleDynamicsConfig
+from drive_cycles.vehicle_dynamics import LongitudinalVehicleModel, LongitudinalForces
 
 
 class EgoVehicle:
@@ -19,6 +20,9 @@ class EgoVehicle:
         self.simulation = simulation
         self.config = config
         self.vehicle_name = config.name
+        self.dynamics = LongitudinalVehicleModel(config)
+        self.grade_deg = 0.0
+        self.last_dynamics: Optional[LongitudinalForces] = None
 
         self.route_segments = tuple(route_segments)
         self.route_index = 0
@@ -192,7 +196,7 @@ class EgoVehicle:
 
         return accel
 
-    def update(self, dt: float) -> None:
+    def update(self, dt: float, grade_deg: float = 0.0) -> None:
         if self.arrived or self.segment is None:
             self.speed = 0.0
             self.acceleration_mps2 = 0.0
@@ -203,16 +207,26 @@ class EgoVehicle:
             return
 
         old_speed = self.speed
-        acceleration = self._target_acceleration()
+        requested_acceleration = self._target_acceleration()
+
+        self.grade_deg = float(grade_deg)
+
+        dynamics = self.dynamics.step(
+            speed_mps=self.speed,
+            requested_acceleration_mps2=requested_acceleration,
+            grade_deg=self.grade_deg,
+        )
+        self.last_dynamics = dynamics
 
         self.speed = max(
             0.0,
-            self.speed + acceleration * dt,
+            self.speed
+            + dynamics.actual_acceleration_mps2 * dt,
         )
 
         desired_speed = self._desired_speed()
 
-        if acceleration >= 0.0:
+        if dynamics.actual_acceleration_mps2 >= 0.0:
             self.speed = min(self.speed, desired_speed)
 
         self.acceleration_mps2 = (
