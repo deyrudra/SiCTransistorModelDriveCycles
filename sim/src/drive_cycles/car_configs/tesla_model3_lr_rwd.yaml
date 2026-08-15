@@ -1,0 +1,33 @@
+vehicle:
+  name: tesla_model3_lr_rwd
+  mass_kg: 1847
+  frontal_area_m2: 2.22
+  drag_coefficient: 0.23
+  rolling_resistance_coefficient: 0.010
+
+powertrain:
+  drivetrain_efficiency: 0.92
+  regenerative_efficiency: 0.80
+  max_propulsion_power_w: 239000
+  max_regen_power_w: 90000
+
+  # Used by the ego vehicle during the Stuttgart traffic simulation.
+  max_acceleration_mps2: 1.8
+  comfortable_braking_mps2: 2.5
+  emergency_braking_mps2: 6.0
+
+driver:
+  safe_distance_m: 5.0
+  time_headway_s: 1.5
+
+inverter:
+  dc_bus_voltage_v: 345.5
+  parallel_devices_per_switch: 4
+
+cooling:
+  coolant_inlet_temp_c: 65.0
+
+reliability:
+  model: coffin_manson_arrhenius
+  calibrated: false
+  calibration_source: null

@@ -177,7 +177,7 @@ class DriveCycleRecorder:
             "status": status,
             "route_node_count": self.route_node_count,
             "route_distance_m": self.route_distance_m,
-            "grade_source": "placeholder_zero",
+            "grade_source": "caller_supplied",
         }
 
         if extra_metadata:

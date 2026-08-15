@@ -69,6 +69,8 @@ from traffic.live_traffic import TomTomTrafficManager
 from drive_cycles.route_planner import Route, nearest_road_node, plan_route
 from drive_cycles.ego_vehicle import EgoVehicle
 from drive_cycles.drive_cycle_recorder import DriveCycleRecorder
+from drive_cycles.vehicle_config import VehicleDynamicsConfig, load_vehicle_config
+from drive_cycles.elevation_data import ElevationManager
 
 # Anchor project/cache discovery to the module that already owns the cache
 # convention, not to wherever this viewer script happens to be copied.
@@ -79,6 +81,8 @@ if str(PROJECT_SRC) not in sys.path:
     sys.path.insert(0, str(PROJECT_SRC))
 DEFAULT_CHUNK_CACHE = PROJECT_ROOT / "cache" / "osm_chunks" / "stuttgart"
 DEFAULT_DRIVE_CYCLE_DIR = PROJECT_ROOT / "cycles"
+DEFAULT_CAR_CONFIG = PROJECT_ROOT / "src" / "drive_cycles" / "car_configs" / "tesla_model3_lr_rwd.yaml"
+DEFAULT_ELEVATION_CACHE = PROJECT_ROOT / "cache" / "elevation" / "stuttgart_srtm90m.json"
 
 # -----------------------------------------------------------------------------
 # Appearance -- map-like rather than debug-grid-like
@@ -794,6 +798,12 @@ class TrafficVisualizer:
         self.drive_cycle_recorder: Optional[DriveCycleRecorder] = None
         self.last_drive_cycle_path: Optional[Path] = None
         self.ego_sim_time_s = 0.0
+        self.vehicle_config: Optional[VehicleDynamicsConfig] = None
+        self.vehicle_config_error: Optional[str] = None
+        self.load_selected_vehicle_config()
+        self.elevation = ElevationManager(cache_path=DEFAULT_ELEVATION_CACHE)
+        self.ego_waiting_for_elevation = False
+        self.current_grade_deg = 0.0
 
         self.vehicle_frame_index = VehicleFrameIndex()
         self.simulation._vehicle_frame_index = self.vehicle_frame_index
@@ -881,6 +891,19 @@ class TrafficVisualizer:
         if keys[pygame.K_s] or keys[pygame.K_DOWN]:
             self.camera.center_y -= speed * dt
 
+    def load_selected_vehicle_config(self) -> None:
+        try:
+            self.vehicle_config = load_vehicle_config(DEFAULT_CAR_CONFIG)
+            self.vehicle_config_error = None
+            print(
+                f"[drive-cycle] vehicle config loaded: "
+                f"{self.vehicle_config.name} ({DEFAULT_CAR_CONFIG})"
+            )
+        except Exception as exc:
+            self.vehicle_config = None
+            self.vehicle_config_error = str(exc)
+            print(f"[drive-cycle] vehicle config error: {exc}")
+
     def clear_route_selection(self) -> None:
         self.finish_drive_cycle("route_cleared")
 
@@ -889,6 +912,8 @@ class TrafficVisualizer:
         self.selected_route = None
         self.ego_vehicle = None
         self.drive_cycle_recorder = None
+        self.ego_waiting_for_elevation = False
+        self.current_grade_deg = 0.0
         self.route_status = "Left click a road to choose route start A"
 
     def select_route_point(self, screen_pos: tuple[int, int]) -> None:
@@ -914,6 +939,7 @@ class TrafficVisualizer:
             self.route_end_node = None
             self.selected_route = None
             self.ego_vehicle = None
+            self.ego_waiting_for_elevation = False
             node = self.network.nodes[node_id]
             self.route_status = (
                 f"A selected at ({node.x:.0f}, {node.y:.0f}) m - left click destination B"
@@ -940,15 +966,70 @@ class TrafficVisualizer:
             return
 
         self.selected_route = route
-        self.spawn_ego_vehicle()
+        self.prepare_route_elevation()
 
         self.route_status = (
-            f"Ego spawned - route {route.distance_m / 1000.0:.2f} km, "
-            f"free-flow estimate {route.estimated_time_s / 60.0:.1f} min"
+            f"Route {route.distance_m / 1000.0:.2f} km selected - "
+            "loading elevation before ego starts"
         )
+
+    def prepare_route_elevation(self) -> None:
+        route = self.selected_route
+
+        if route is None:
+            self.ego_waiting_for_elevation = False
+            return
+
+        self.elevation.request_nodes(
+            self.network,
+            route.node_ids,
+        )
+
+        if self.elevation.route_ready(
+            route.node_ids
+        ):
+            self.ego_waiting_for_elevation = False
+            self.spawn_ego_vehicle()
+            return
+
+        self.ego_waiting_for_elevation = True
+
+        ready, total = self.elevation.route_progress(
+            route.node_ids
+        )
+
+        self.route_status = (
+            f"Loading route elevation: "
+            f"{ready}/{total} nodes ready"
+        )
+
+    def ego_grade_deg(self) -> float:
+        vehicle = self.ego_vehicle
+
+        if (
+            vehicle is None
+            or vehicle.segment is None
+        ):
+            return 0.0
+
+        grade = self.elevation.segment_grade_deg(
+            vehicle.segment,
+            self.network,
+        )
+
+        if grade is None:
+            return 0.0
+
+        return grade
 
     def spawn_ego_vehicle(self) -> None:
         route = self.selected_route
+
+        if self.vehicle_config is None:
+            self.ego_vehicle = None
+            self.drive_cycle_recorder = None
+            self.route_status = "Cannot spawn ego: vehicle YAML failed to load"
+            return
 
         if route is None or not route.segments:
             self.ego_vehicle = None
@@ -967,6 +1048,7 @@ class TrafficVisualizer:
             route_segments=route.segments,
             network=self.network,
             simulation=self.simulation,
+            config=self.vehicle_config,
         )
 
         self.ego_sim_time_s = 0.0
@@ -979,10 +1061,12 @@ class TrafficVisualizer:
             sample_interval_s=0.05,
         )
 
+        self.current_grade_deg = self.ego_grade_deg()
+
         self.drive_cycle_recorder.start(
             self.ego_sim_time_s,
             initial_speed_mps=self.ego_vehicle.speed,
-            grade_deg=0.0,
+            grade_deg=self.current_grade_deg,
         )
 
         self.route_status = (
@@ -1004,6 +1088,13 @@ class TrafficVisualizer:
                     "traffic_speed_factor",
                     1.0,
                 ),
+                "vehicle_config": (
+                    self.vehicle_config.name
+                    if self.vehicle_config is not None
+                    else "unknown"
+                ),
+                "elevation_dataset": self.elevation.dataset,
+                "elevation_cache": str(DEFAULT_ELEVATION_CACHE),
             },
         )
 
@@ -1466,8 +1557,10 @@ class TrafficVisualizer:
         if self.ego_vehicle is not None:
             ego = self.ego_vehicle
             lines += [
+                f"Ego vehicle   {ego.vehicle_name}",
                 f"Ego speed     {ego.speed * 3.6:7.1f} km/h",
                 f"Ego accel     {ego.acceleration_mps2:7.2f} m/s2",
+                f"Road grade    {self.current_grade_deg:+7.2f} deg",
                 f"Ego progress  {ego.progress * 100.0:7.1f}%",
             ]
 
@@ -1478,6 +1571,19 @@ class TrafficVisualizer:
                     f"Drive cycle   {state}",
                     f"Samples       {recorder.sample_count:7d}",
                 ]
+        if self.vehicle_config_error:
+            lines += [
+                "",
+                "Vehicle config error:",
+                self.vehicle_config_error[:72],
+            ]
+
+        if self.elevation.last_error:
+            lines += [
+                "",
+                self.elevation.last_error[:72],
+            ]
+
         if self.chunks.last_error:
             lines += ["", self.chunks.last_error[:72]]
         rendered = [self.small_font.render(t, True, HUD_TEXT if i == 0 else HUD_MUTED)
@@ -1505,6 +1611,28 @@ class TrafficVisualizer:
             self.refresh_visible_sets()
             self.maybe_spawn_initial()
 
+            self.elevation.poll()
+
+            if (
+                self.ego_waiting_for_elevation
+                and self.selected_route is not None
+            ):
+                route = self.selected_route
+
+                if self.elevation.route_ready(
+                    route.node_ids
+                ):
+                    self.ego_waiting_for_elevation = False
+                    self.spawn_ego_vehicle()
+                else:
+                    ready, total = self.elevation.route_progress(
+                        route.node_ids
+                    )
+                    self.route_status = (
+                        f"Loading route elevation: "
+                        f"{ready}/{total} nodes ready"
+                    )
+
             traffic = self.live_traffic.update(self.camera)
             if traffic is not None:
                 self.simulation.traffic_speed_factor = traffic.speed_factor
@@ -1530,11 +1658,13 @@ class TrafficVisualizer:
                     self.ego_vehicle.update(ego_dt)
                     self.ego_sim_time_s += ego_dt
 
+                    self.current_grade_deg = self.ego_grade_deg()
+
                     if self.drive_cycle_recorder is not None:
                         self.drive_cycle_recorder.record(
                             simulation_time_s=self.ego_sim_time_s,
                             speed_mps=self.ego_vehicle.speed,
-                            grade_deg=0.0,
+                            grade_deg=self.current_grade_deg,
                         )
 
                     if self.ego_vehicle.arrived:
@@ -1562,6 +1692,7 @@ class TrafficVisualizer:
             pygame.display.flip()
 
         self.finish_drive_cycle("application_shutdown")
+        self.elevation.close()
         self.live_traffic.close()
         self.chunks.close()
         pygame.quit()

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+from drive_cycles.vehicle_config import VehicleDynamicsConfig
+
 
 class EgoVehicle:
     def __init__(
@@ -10,10 +12,13 @@ class EgoVehicle:
         route_segments,
         network,
         simulation,
+        config: VehicleDynamicsConfig,
     ) -> None:
         self.id = int(vehicle_id)
         self.network = network
         self.simulation = simulation
+        self.config = config
+        self.vehicle_name = config.name
 
         self.route_segments = tuple(route_segments)
         self.route_index = 0
@@ -23,11 +28,11 @@ class EgoVehicle:
         self.speed = 0.0
         self.acceleration_mps2 = 0.0
 
-        self.max_acceleration_mps2 = 1.8
-        self.comfortable_braking_mps2 = 2.5
-        self.emergency_braking_mps2 = 6.0
-        self.safe_distance_m = 5.0
-        self.time_headway_s = 1.5
+        self.max_acceleration_mps2 = config.max_acceleration_mps2
+        self.comfortable_braking_mps2 = config.comfortable_braking_mps2
+        self.emergency_braking_mps2 = config.emergency_braking_mps2
+        self.safe_distance_m = config.safe_distance_m
+        self.time_headway_s = config.time_headway_s
 
         self.arrived = not bool(self.route_segments)
 
