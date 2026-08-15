@@ -7,3 +7,9 @@ A new class for the test vehicle will be created as `ego_vehicle.py`.
 Additionally, `visualization.py` will be updated so that once A->B is selected, the ego vehicle is spawned on that route.
 
 A `drive_cycle_recorder.py` will be used to record the raw drive cycles for the ego vehicle.
+
+
+
+**Added vehicle config + elevation support.**
+
+Introduced per-vehicle dynamics and asynchronous route elevation fetching for Stuttgart drive-cycle generation. Added `VehicleDynamicsConfig` loader (sim/src/drive_cycles/vehicle_config.py) and a Tesla Model 3 YAML (car_configs/tesla_model3_lr_rwd.yaml). Implemented `ElevationManager` (sim/src/drive_cycles/elevation_data.py) that queries `OpenTopoData`, persists a local cache, and provides segment grades.
