@@ -72,3 +72,32 @@ Creating `glb_chunk_manager.py`
 
 
 
+**Step 3**
+Creating `unity_protocol.py`
+
+- Purpose: Define a clean message format between Python and Unity. This is not sending anything via sockets to unity, rather deciding what messages look like and provide encode/decode helpers.
+
+- Message Types:
+
+  ```
+  hello
+  chunk_load
+  chunk_unload
+  camera_state
+  vehicles
+  traffic_lights
+  simulation_state
+  ```
+
+- Chunk Message Example:
+
+  ```json
+  {
+    "type": "chunk_load",
+    "cx": 0,
+    "cy": 1,
+    "path": "cache/glb_chunks/stuttgart/chunk_0_1.glb"
+  }
+  ```
+
+- 
