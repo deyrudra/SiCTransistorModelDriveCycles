@@ -100,4 +100,38 @@ Creating `unity_protocol.py`
   }
   ```
 
-- 
+
+
+**Step 4**
+Creating `unity_bridge.py`
+
+- Purpose: networking layer between your Python simulation and Unity
+- Functions:
+  - open a TCP server on Python
+  - accept the Unity client
+  - send NDJSON messages using `unity_protocol.py`
+  - send `chunk_load` / `chunk_unload` events from `GlbChunkManager`
+  - periodically send vehicles, traffic lights, and simulation state
+  - receive camera/state messages from Unity
+  - never block the simulation loop
+
+**Step 5**
+This step is loading the GLB models in Unity.
+
+- Installing glTFast package in Unity:
+
+  1. Open **Window → Package Manager**
+  2. Click the `+`
+  3. Choose **Install package by name...**
+  4. Enter: `com.unity.cloud.gltfast`
+
+- Also wrote two `cs` scripts:
+
+  - `Assets/Assets/Scripts/GlbChunkStreamer.cs`
+
+    `Assets/Assets/Scripts/PythonWorldClient.cs`
+
+  - They can be found in the repo at: `SiCTransistorModelDriveCycles\sim\src\unity\UNITYCLIENTSIDE\assets\Scripts\`
+
+
+
