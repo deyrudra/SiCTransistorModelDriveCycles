@@ -133,5 +133,5 @@ This step is loading the GLB models in Unity.
 
   - They can be found in the repo at: `SiCTransistorModelDriveCycles\sim\src\unity\UNITYCLIENTSIDE\assets\Scripts\`
 
-
+This is really buggy, going to abandon for now.
 
