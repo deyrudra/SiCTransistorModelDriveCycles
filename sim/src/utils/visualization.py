@@ -65,6 +65,7 @@ from traffic.simulation import Simulation
 from traffic.vehicle import Vehicle
 from chunks.grid import CHUNK_SIZE, world_to_chunk, chunk_bounds
 from chunks.projection import local_bounds_to_latlon
+from traffic.live_traffic import TomTomTrafficManager
 
 # Anchor project/cache discovery to the module that already owns the cache
 # convention, not to wherever this viewer script happens to be copied.
@@ -760,6 +761,9 @@ class TrafficVisualizer:
         self.camera = Camera(width, height)
         self.initial_vehicles = initial_vehicles
         self.initial_spawn_done = False
+        self.live_traffic = TomTomTrafficManager(api_key="01wsudAvfMlglSx4dguhq9L0iciHwNM9")
+        self.simulation.traffic_speed_factor = 1.0
+        self._traffic_target_vehicles = initial_vehicles
 
         self.running = True
         self.paused = False
@@ -1189,6 +1193,7 @@ class TrafficVisualizer:
             f"Vehicles     {len(self.simulation.vehicles):7d}",
             f"Avg speed    {avg * 3.6:7.1f} km/h",
             f"Sim speed    {self.simulation.speed:7.3g}x",
+            f"Traffic x    {getattr(self.simulation, 'traffic_speed_factor', 1.0):7.2f}",
             "",
             "WASD/drag pan   wheel zoom",
             "L labels   B buildings   G grid",
@@ -1220,6 +1225,17 @@ class TrafficVisualizer:
             loaded = self.chunks.ensure_view(self.camera)
             self.refresh_visible_sets()
             self.maybe_spawn_initial()
+
+            traffic = self.live_traffic.update(self.camera)
+            if traffic is not None:
+                self.simulation.traffic_speed_factor = traffic.speed_factor
+                self._traffic_target_vehicles = max(5, int(self.initial_vehicles * traffic.density_factor))
+                deficit = self._traffic_target_vehicles - len(self.simulation.vehicles)
+                if deficit > 0:
+                    spawn_vehicles(self.network, self.simulation, min(deficit, 2), self.camera)
+                elif deficit < -8:
+                    # Remove slowly so a refresh never causes a visible traffic pop.
+                    del self.simulation.vehicles[:min(2, -deficit)]
             if loaded and len(self.simulation.vehicles) < 140:
                 spawn_vehicles(self.network, self.simulation, min(loaded * 2, 8), self.camera)
 
@@ -1239,6 +1255,7 @@ class TrafficVisualizer:
             self.draw_hud()
             pygame.display.flip()
 
+        self.live_traffic.close()
         self.chunks.close()
         pygame.quit()
 

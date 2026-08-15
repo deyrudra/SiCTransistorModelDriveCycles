@@ -19,6 +19,11 @@ class Vehicle:
         else:
             target_speed = self.segment.speed_limit
 
+        # TomTom live flow is represented as a simulation-wide speed factor.
+        # 1.0 means free flow; lower values represent observed congestion.
+        traffic_factor = getattr(self.simulation, "traffic_speed_factor", 1.0)
+        target_speed *= max(0.12, min(1.0, traffic_factor))
+
         light_state = self.get_traffic_light_state()
 
         if light_state in ("red", "yellow"):
