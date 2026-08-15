@@ -37,3 +37,38 @@ Creating `osm2world_converter.py`
 - Script Location: `src/unity/osm2world_converter.py`
 
 This script is simple, it uses the command line tools in osm2world to convert the `.osm` file to `.glb` and stores it in the Output/Save Location.
+
+
+
+**Step 2**
+Creating `glb_chunk_manager.py`
+
+- Functions:
+
+  - decide which chunks are needed
+  - reuse existing GLBs
+  - request missing conversions
+  - track pending / ready / failed chunks
+  - report chunks to load/unload
+
+- Purpose: Calling `GlbChunkManager(radius=2)` gets you a 5x5 chunk around the camera point. 
+
+- ```
+  250 m × 5 = 1250 m
+  
+         Unity streaming area
+  ┌────┬────┬────┬────┬────┐
+  │    │    │    │    │    │
+  ├────┼────┼────┼────┼────┤
+  │    │    │    │    │    │
+  ├────┼────┼────┼────┼────┤
+  │    │    │CAM │    │    │
+  ├────┼────┼────┼────┼────┤
+  │    │    │    │    │    │
+  ├────┼────┼────┼────┼────┤
+  │    │    │    │    │    │
+  └────┴────┴────┴────┴────┘
+  ```
+
+
+
