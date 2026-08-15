@@ -67,6 +67,8 @@ from chunks.grid import CHUNK_SIZE, world_to_chunk, chunk_bounds
 from chunks.projection import local_bounds_to_latlon
 from traffic.live_traffic import TomTomTrafficManager
 from drive_cycles.route_planner import Route, nearest_road_node, plan_route
+from drive_cycles.ego_vehicle import EgoVehicle
+from drive_cycles.drive_cycle_recorder import DriveCycleRecorder
 
 # Anchor project/cache discovery to the module that already owns the cache
 # convention, not to wherever this viewer script happens to be copied.
@@ -76,6 +78,7 @@ PROJECT_SRC = PROJECT_ROOT / "src"
 if str(PROJECT_SRC) not in sys.path:
     sys.path.insert(0, str(PROJECT_SRC))
 DEFAULT_CHUNK_CACHE = PROJECT_ROOT / "cache" / "osm_chunks" / "stuttgart"
+DEFAULT_DRIVE_CYCLE_DIR = PROJECT_ROOT / "cycles"
 
 # -----------------------------------------------------------------------------
 # Appearance -- map-like rather than debug-grid-like
@@ -110,6 +113,8 @@ ROUTE_LINE = (36, 94, 190)
 ROUTE_START = (40, 170, 80)
 ROUTE_END = (210, 65, 65)
 ROUTE_MARKER_EDGE = (250, 250, 250)
+EGO_VEHICLE = (255, 80, 20)
+EGO_VEHICLE_EDGE = (255, 255, 255)
 
 CHUNK_MARGIN = 1
 MIN_ZOOM = 0.15
@@ -785,6 +790,11 @@ class TrafficVisualizer:
         self.selected_route: Optional[Route] = None
         self.route_status = "Left click a road to choose route start A"
 
+        self.ego_vehicle: Optional[EgoVehicle] = None
+        self.drive_cycle_recorder: Optional[DriveCycleRecorder] = None
+        self.last_drive_cycle_path: Optional[Path] = None
+        self.ego_sim_time_s = 0.0
+
         self.vehicle_frame_index = VehicleFrameIndex()
         self.simulation._vehicle_frame_index = self.vehicle_frame_index
         self.simulation._signal_state_cache = {}
@@ -872,9 +882,13 @@ class TrafficVisualizer:
             self.camera.center_y -= speed * dt
 
     def clear_route_selection(self) -> None:
+        self.finish_drive_cycle("route_cleared")
+
         self.route_start_node = None
         self.route_end_node = None
         self.selected_route = None
+        self.ego_vehicle = None
+        self.drive_cycle_recorder = None
         self.route_status = "Left click a road to choose route start A"
 
     def select_route_point(self, screen_pos: tuple[int, int]) -> None:
@@ -893,9 +907,13 @@ class TrafficVisualizer:
             return
 
         if self.route_start_node is None or self.route_end_node is not None:
+            self.finish_drive_cycle("route_replaced")
+            self.drive_cycle_recorder = None
+
             self.route_start_node = node_id
             self.route_end_node = None
             self.selected_route = None
+            self.ego_vehicle = None
             node = self.network.nodes[node_id]
             self.route_status = (
                 f"A selected at ({node.x:.0f}, {node.y:.0f}) m - left click destination B"
@@ -922,9 +940,143 @@ class TrafficVisualizer:
             return
 
         self.selected_route = route
+        self.spawn_ego_vehicle()
+
         self.route_status = (
-            f"Route: {route.distance_m / 1000.0:.2f} km, "
+            f"Ego spawned - route {route.distance_m / 1000.0:.2f} km, "
             f"free-flow estimate {route.estimated_time_s / 60.0:.1f} min"
+        )
+
+    def spawn_ego_vehicle(self) -> None:
+        route = self.selected_route
+
+        if route is None or not route.segments:
+            self.ego_vehicle = None
+            self.drive_cycle_recorder = None
+            return
+
+        self.finish_drive_cycle("route_replaced")
+
+        next_id = max(
+            (v.id for v in self.simulation.vehicles),
+            default=-1,
+        ) + 100000
+
+        self.ego_vehicle = EgoVehicle(
+            vehicle_id=next_id,
+            route_segments=route.segments,
+            network=self.network,
+            simulation=self.simulation,
+        )
+
+        self.ego_sim_time_s = 0.0
+
+        self.drive_cycle_recorder = DriveCycleRecorder(
+            vehicle_id=next_id,
+            output_dir=DEFAULT_DRIVE_CYCLE_DIR,
+            route_node_count=len(route.node_ids),
+            route_distance_m=route.distance_m,
+            sample_interval_s=0.05,
+        )
+
+        self.drive_cycle_recorder.start(
+            self.ego_sim_time_s,
+            initial_speed_mps=self.ego_vehicle.speed,
+            grade_deg=0.0,
+        )
+
+        self.route_status = (
+            f"Ego recording started - "
+            f"{route.distance_m / 1000.0:.2f} km route"
+        )
+
+    def finish_drive_cycle(self, status: str) -> None:
+        recorder = self.drive_cycle_recorder
+
+        if recorder is None or recorder.saved:
+            return
+
+        path = recorder.save(
+            status=status,
+            extra_metadata={
+                "traffic_speed_factor": getattr(
+                    self.simulation,
+                    "traffic_speed_factor",
+                    1.0,
+                ),
+            },
+        )
+
+        if path is not None:
+            self.last_drive_cycle_path = path
+
+    def draw_ego_vehicle(self) -> None:
+        vehicle = self.ego_vehicle
+
+        if vehicle is None or vehicle.segment is None:
+            return
+
+        x, y = vehicle.get_position()
+        center = self.camera.world_to_screen(x, y)
+
+        if not self.visible(center, 40):
+            return
+
+        a = self.network.nodes.get(vehicle.segment.u)
+        b = self.network.nodes.get(vehicle.segment.v)
+
+        if a is None or b is None:
+            return
+
+        angle = math.atan2(
+            -(b.y - a.y),
+            b.x - a.x,
+        )
+
+        ppm = self.camera.pixels_per_meter
+        length = max(10.0, min(22.0, 5.0 * ppm))
+        width = max(5.0, min(10.0, 2.1 * ppm))
+
+        forward = pygame.Vector2(
+            math.cos(angle),
+            math.sin(angle),
+        )
+        right = pygame.Vector2(
+            -forward.y,
+            forward.x,
+        )
+        c = pygame.Vector2(center)
+
+        corners = [
+            c + forward * length / 2 + right * width / 2,
+            c + forward * length / 2 - right * width / 2,
+            c - forward * length / 2 - right * width / 2,
+            c - forward * length / 2 + right * width / 2,
+        ]
+
+        pygame.draw.polygon(
+            self.screen,
+            EGO_VEHICLE,
+            corners,
+        )
+        pygame.draw.polygon(
+            self.screen,
+            EGO_VEHICLE_EDGE,
+            corners,
+            2,
+        )
+
+        label = self.small_font.render(
+            "EGO",
+            True,
+            EGO_VEHICLE_EDGE,
+        )
+        self.screen.blit(
+            label,
+            (
+                center[0] - label.get_width() // 2,
+                center[1] - 24,
+            ),
         )
 
     def draw_selected_route(self) -> None:
@@ -1310,6 +1462,22 @@ class TrafficVisualizer:
             "",
             self.route_status,
         ]
+
+        if self.ego_vehicle is not None:
+            ego = self.ego_vehicle
+            lines += [
+                f"Ego speed     {ego.speed * 3.6:7.1f} km/h",
+                f"Ego accel     {ego.acceleration_mps2:7.2f} m/s2",
+                f"Ego progress  {ego.progress * 100.0:7.1f}%",
+            ]
+
+            if self.drive_cycle_recorder is not None:
+                recorder = self.drive_cycle_recorder
+                state = "saved" if recorder.saved else "recording"
+                lines += [
+                    f"Drive cycle   {state}",
+                    f"Samples       {recorder.sample_count:7d}",
+                ]
         if self.chunks.last_error:
             lines += ["", self.chunks.last_error[:72]]
         rendered = [self.small_font.render(t, True, HUD_TEXT if i == 0 else HUD_MUTED)
@@ -1356,6 +1524,31 @@ class TrafficVisualizer:
                 self.vehicle_frame_index.rebuild(self.simulation.vehicles)
                 self.refresh_signal_cache()
                 self.simulation.update(dt)
+
+                if self.ego_vehicle is not None:
+                    ego_dt = dt * self.simulation.speed
+                    self.ego_vehicle.update(ego_dt)
+                    self.ego_sim_time_s += ego_dt
+
+                    if self.drive_cycle_recorder is not None:
+                        self.drive_cycle_recorder.record(
+                            simulation_time_s=self.ego_sim_time_s,
+                            speed_mps=self.ego_vehicle.speed,
+                            grade_deg=0.0,
+                        )
+
+                    if self.ego_vehicle.arrived:
+                        self.finish_drive_cycle("arrived")
+
+                        if self.last_drive_cycle_path is not None:
+                            self.route_status = (
+                                "Ego arrived - saved "
+                                f"{self.last_drive_cycle_path.name}"
+                            )
+                        else:
+                            self.route_status = (
+                                "Ego vehicle arrived at destination B"
+                            )
             else:
                 self.refresh_signal_cache()
 
@@ -1363,10 +1556,12 @@ class TrafficVisualizer:
             self.draw_selected_route()
             self.draw_lights()
             self.draw_vehicles()
+            self.draw_ego_vehicle()
             self.draw_stream_status()
             self.draw_hud()
             pygame.display.flip()
 
+        self.finish_drive_cycle("application_shutdown")
         self.live_traffic.close()
         self.chunks.close()
         pygame.quit()
