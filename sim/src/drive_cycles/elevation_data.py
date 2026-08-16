@@ -1,21 +1,41 @@
 from __future__ import annotations
 
 """
-Asynchronous route elevation provider for Stuttgart drive-cycle generation.
+Local-first elevation manager.
 
-Uses OpenTopoData's SRTM90m endpoint by default and stores a persistent local
-cache so previously queried OSM nodes do not require another network request.
+Lookup priority:
+    1. persistent JSON node cache
+    2. local .hgt DEM tiles
+    3. no public HTTP elevation API
 
-Only nodes explicitly requested by the drive-cycle route are queried.
+This drop-in replacement preserves the interface used by visualization.py and
+the headless parallel simulation code:
+    request_nodes()
+    poll()
+    route_ready()
+    route_progress()
+    segment_grade_deg()
+    close()
+    dataset
+    last_error
+
+The goal is deterministic, rate-limit-free F5 route simulation.
 """
 
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import (
+    Future,
+    ThreadPoolExecutor,
+)
 import json
 import math
 from pathlib import Path
 import threading
-from typing import Iterable, Optional
-from urllib import request
+from typing import Any
+
+from drive_cycles.local_dem import (
+    LocalHgtDem,
+    tile_name_for_latlon,
+)
 
 
 class ElevationManager:
@@ -23,410 +43,446 @@ class ElevationManager:
         self,
         *,
         cache_path: str | Path,
-        dataset: str = "srtm90m",
-        api_base_url: str = "https://api.opentopodata.org/v1",
-        batch_size: int = 90,
-        timeout_s: float = 20.0,
+        dem_dir: str | Path | None = None,
+        max_workers: int = 2,
     ) -> None:
-        self.cache_path = Path(cache_path)
-        self.dataset = dataset
-        self.api_url = f"{api_base_url.rstrip('/')}/{dataset}"
-        self.batch_size = max(1, min(int(batch_size), 100))
-        self.timeout_s = max(1.0, float(timeout_s))
+        self.cache_path = Path(
+            cache_path
+        )
 
-        self._lock = threading.Lock()
-        self._elevations: dict[int, float] = {}
-        self._pending: set[int] = set()
-        self._failed: set[int] = set()
-        self._futures: list[Future] = []
+        if dem_dir is None:
+            dem_dir = (
+                self.cache_path.parent
+                / "dem"
+            )
 
-        self.executor = ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix="route-elevation",
+        self.dem_dir = Path(
+            dem_dir
+        )
+
+        self.dem = LocalHgtDem(
+            self.dem_dir
+        )
+
+        self.dataset = (
+            "local_hgt+json_cache"
         )
 
         self.last_error = ""
-        self.requests_started = 0
-        self.points_downloaded = 0
 
-        self._load_cache()
+        self._cache_lock = threading.RLock()
+
+        self._cache = self._load_cache()
+
+        self._executor = ThreadPoolExecutor(
+            max_workers=max(
+                1,
+                int(max_workers),
+            ),
+            thread_name_prefix="local-elevation",
+        )
+
+        self._pending: dict[
+            int,
+            Future
+        ] = {}
+
+        self._dirty = False
 
     def close(self) -> None:
         self.poll()
-        self._save_cache()
-        self.executor.shutdown(
+        self._save_cache_if_needed()
+        self._executor.shutdown(
             wait=False,
             cancel_futures=True,
         )
+        self.dem.close()
 
-    # ------------------------------------------------------------------
-    # Persistent cache
-    # ------------------------------------------------------------------
-
-    def _load_cache(self) -> None:
+    def _load_cache(
+        self,
+    ) -> dict[str, float]:
         if not self.cache_path.is_file():
-            return
+            return {}
 
         try:
-            payload = json.loads(
-                self.cache_path.read_text(encoding="utf-8")
-            )
+            with self.cache_path.open(
+                "r",
+                encoding="utf-8",
+            ) as handle:
+                raw = json.load(
+                    handle
+                )
+        except (
+            OSError,
+            json.JSONDecodeError,
+        ):
+            return {}
 
-            values = payload.get("nodes", payload)
+        result = {}
 
-            if not isinstance(values, dict):
-                return
-
-            loaded = {}
-
-            for key, value in values.items():
+        if isinstance(
+            raw,
+            dict,
+        ):
+            for key, value in raw.items():
                 try:
-                    node_id = int(key)
-                    elevation = float(value)
-                except (TypeError, ValueError):
+                    result[
+                        str(key)
+                    ] = float(
+                        value
+                    )
+                except (
+                    TypeError,
+                    ValueError,
+                ):
                     continue
 
-                if math.isfinite(elevation):
-                    loaded[node_id] = elevation
+        return result
 
-            self._elevations.update(loaded)
+    def _save_cache_if_needed(
+        self,
+    ) -> None:
+        if not self._dirty:
+            return
 
-        except Exception as exc:
-            self.last_error = (
-                f"Could not load elevation cache: {exc}"
+        self.cache_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        temporary = (
+            self.cache_path
+            .with_suffix(
+                self.cache_path.suffix
+                + ".tmp"
+            )
+        )
+
+        with self._cache_lock:
+            payload = dict(
+                self._cache
             )
 
-    def _save_cache(self) -> None:
-        try:
-            self.cache_path.parent.mkdir(
-                parents=True,
-                exist_ok=True,
+        with temporary.open(
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            json.dump(
+                payload,
+                handle,
+                indent=2,
+                sort_keys=True,
             )
 
-            temp = self.cache_path.with_suffix(
-                self.cache_path.suffix + ".tmp"
-            )
+        temporary.replace(
+            self.cache_path
+        )
 
-            payload = {
-                "dataset": self.dataset,
-                "nodes": {
-                    str(node_id): elevation
-                    for node_id, elevation
-                    in sorted(self._elevations.items())
-                },
-            }
-
-            temp.write_text(
-                json.dumps(
-                    payload,
-                    indent=2,
-                    sort_keys=True,
-                ),
-                encoding="utf-8",
-            )
-
-            temp.replace(self.cache_path)
-
-        except Exception as exc:
-            self.last_error = (
-                f"Could not save elevation cache: {exc}"
-            )
-
-    # ------------------------------------------------------------------
-    # Network requests
-    # ------------------------------------------------------------------
+        self._dirty = False
 
     @staticmethod
-    def _lat_lon(node) -> Optional[tuple[float, float]]:
-        lat = getattr(node, "lat", None)
-        lon = getattr(node, "lon", None)
+    def _node_key(
+        node_id: Any,
+    ) -> str:
+        return str(
+            node_id
+        )
 
-        if lon is None:
-            lon = getattr(node, "lng", None)
+    @staticmethod
+    def _node_latlon(
+        node,
+    ) -> tuple[float, float]:
+        latitude = float(
+            node.lat
+        )
 
-        if lat is None or lon is None:
-            return None
+        longitude = None
 
-        try:
-            lat = float(lat)
-            lon = float(lon)
-        except (TypeError, ValueError):
-            return None
-
-        if not (
-            math.isfinite(lat)
-            and math.isfinite(lon)
+        for name in (
+            "lon",
+            "lng",
+            "longitude",
         ):
-            return None
+            if hasattr(
+                node,
+                name,
+            ):
+                longitude = float(
+                    getattr(
+                        node,
+                        name,
+                    )
+                )
+                break
 
-        return lat, lon
+        if longitude is None:
+            raise AttributeError(
+                "Road node has no lon/lng/longitude attribute."
+            )
+
+        return (
+            latitude,
+            longitude,
+        )
+
+    def _lookup_node_worker(
+        self,
+        node_id: Any,
+        latitude: float,
+        longitude: float,
+    ) -> tuple[
+        Any,
+        float | None,
+        str | None,
+    ]:
+        try:
+            elevation = self.dem.elevation_m(
+                latitude,
+                longitude,
+            )
+        except FileNotFoundError:
+            tile = tile_name_for_latlon(
+                latitude,
+                longitude,
+            )
+
+            return (
+                node_id,
+                None,
+                (
+                    f"Local DEM tile {tile}.hgt is missing. "
+                    "Run: python -m "
+                    "drive_cycles.download_local_dem"
+                ),
+            )
+        except Exception as exc:
+            return (
+                node_id,
+                None,
+                (
+                    f"Local DEM lookup failed for "
+                    f"node {node_id}: {exc}"
+                ),
+            )
+
+        if elevation is None:
+            return (
+                node_id,
+                None,
+                (
+                    f"DEM returned no elevation "
+                    f"for node {node_id}"
+                ),
+            )
+
+        return (
+            node_id,
+            float(elevation),
+            None,
+        )
 
     def request_nodes(
         self,
         network,
-        node_ids: Iterable[int],
+        node_ids,
     ) -> None:
-        """
-        Queue missing route nodes for asynchronous elevation retrieval.
-        """
+        # De-duplicate before submitting jobs. This is especially important when
+        # Route 1/2/3 share most of the same OSM nodes.
+        unique_ids = dict.fromkeys(
+            node_ids
+        )
 
-        batch: list[tuple[int, float, float]] = []
+        for node_id in unique_ids:
+            key = self._node_key(
+                node_id
+            )
 
-        for node_id in node_ids:
-            node_id = int(node_id)
-
-            with self._lock:
-                if (
-                    node_id in self._elevations
-                    or node_id in self._pending
-                ):
+            with self._cache_lock:
+                if key in self._cache:
                     continue
 
-            node = network.nodes.get(node_id)
-
-            if node is None:
-                self._failed.add(node_id)
+            if node_id in self._pending:
                 continue
 
-            coords = self._lat_lon(node)
+            node = network.nodes.get(
+                node_id
+            )
 
-            if coords is None:
-                self._failed.add(node_id)
+            if node is None:
+                continue
+
+            try:
+                latitude, longitude = (
+                    self._node_latlon(
+                        node
+                    )
+                )
+            except Exception as exc:
                 self.last_error = (
-                    f"OSM node {node_id} has no latitude/longitude"
+                    f"Elevation coordinates missing "
+                    f"for node {node_id}: {exc}"
                 )
                 continue
 
-            lat, lon = coords
-            batch.append(
-                (node_id, lat, lon)
-            )
-
-            if len(batch) >= self.batch_size:
-                self._submit_batch(batch)
-                batch = []
-
-        if batch:
-            self._submit_batch(batch)
-
-    def _submit_batch(
-        self,
-        points: list[tuple[int, float, float]],
-    ) -> None:
-        points = list(points)
-
-        with self._lock:
-            self._pending.update(
+            self._pending[
                 node_id
-                for node_id, _, _ in points
+            ] = self._executor.submit(
+                self._lookup_node_worker,
+                node_id,
+                latitude,
+                longitude,
             )
 
-        future = self.executor.submit(
-            self._fetch_batch,
-            points,
-        )
+    def poll(self) -> None:
+        completed = [
+            (
+                node_id,
+                future,
+            )
+            for node_id, future
+            in self._pending.items()
+            if future.done()
+        ]
 
-        self._futures.append(future)
-        self.requests_started += 1
-
-    def _fetch_batch(
-        self,
-        points: list[tuple[int, float, float]],
-    ):
-        locations = "|".join(
-            f"{lat:.7f},{lon:.7f}"
-            for _, lat, lon in points
-        )
-
-        body = json.dumps(
-            {
-                "locations": locations,
-                "interpolation": "cubic",
-            }
-        ).encode("utf-8")
-
-        req = request.Request(
-            self.api_url,
-            data=body,
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": "StuttgartDriveCycle/1.0",
-            },
-            method="POST",
-        )
-
-        with request.urlopen(
-            req,
-            timeout=self.timeout_s,
-        ) as response:
-            payload = json.loads(
-                response.read().decode("utf-8")
+        for node_id, future in completed:
+            self._pending.pop(
+                node_id,
+                None,
             )
 
-        if payload.get("status") != "OK":
-            raise RuntimeError(
-                f"Elevation API returned status "
-                f"{payload.get('status')!r}"
-            )
+            try:
+                (
+                    returned_id,
+                    elevation,
+                    error,
+                ) = future.result()
+            except Exception as exc:
+                self.last_error = (
+                    f"Local elevation worker failed: "
+                    f"{exc}"
+                )
+                continue
 
-        results = payload.get("results", [])
-
-        if len(results) != len(points):
-            raise RuntimeError(
-                "Elevation API returned a different number "
-                "of results than requested."
-            )
-
-        output: dict[int, float] = {}
-
-        for point, result in zip(points, results):
-            node_id = point[0]
-            elevation = result.get("elevation")
+            if error:
+                self.last_error = error
+                continue
 
             if elevation is None:
                 continue
 
-            elevation = float(elevation)
+            key = self._node_key(
+                returned_id
+            )
 
-            if math.isfinite(elevation):
-                output[node_id] = elevation
-
-        return points, output
-
-    def poll(self) -> int:
-        """
-        Integrate completed background requests.
-        Returns number of newly cached elevation points.
-        """
-
-        completed = []
-        remaining = []
-
-        for future in self._futures:
-            if future.done():
-                completed.append(future)
-            else:
-                remaining.append(future)
-
-        self._futures = remaining
-
-        added = 0
-
-        for future in completed:
-            try:
-                points, values = future.result()
-
-                with self._lock:
-                    for node_id, _, _ in points:
-                        self._pending.discard(node_id)
-
-                    for node_id, elevation in values.items():
-                        self._elevations[node_id] = elevation
-                        self._failed.discard(node_id)
-
-                missing = (
-                    set(node_id for node_id, _, _ in points)
-                    - set(values)
+            with self._cache_lock:
+                self._cache[
+                    key
+                ] = float(
+                    elevation
                 )
 
-                self._failed.update(missing)
+            self._dirty = True
+            self.last_error = ""
 
-                added += len(values)
-                self.points_downloaded += len(values)
+        if completed:
+            self._save_cache_if_needed()
 
-                if missing:
-                    self.last_error = (
-                        f"Elevation unavailable for "
-                        f"{len(missing)} route node(s)"
-                    )
-                else:
-                    self.last_error = ""
-
-            except Exception as exc:
-                self.last_error = (
-                    f"Elevation request failed: {exc}"
-                )
-
-                # Pending IDs must be released on failure so a future route
-                # selection can retry them.
-                # Future exceptions do not expose the original list reliably,
-                # so clear the current pending set. There is only one worker.
-                with self._lock:
-                    self._pending.clear()
-
-        if added:
-            self._save_cache()
-
-        return added
-
-    # ------------------------------------------------------------------
-    # Elevation / grade access
-    # ------------------------------------------------------------------
-
-    def elevation_m(
+    def elevation_for_node(
         self,
-        node_id: int,
-    ) -> Optional[float]:
-        return self._elevations.get(
-            int(node_id)
+        node_id: Any,
+    ) -> float | None:
+        key = self._node_key(
+            node_id
+        )
+
+        with self._cache_lock:
+            value = self._cache.get(
+                key
+            )
+
+        return (
+            None
+            if value is None
+            else float(value)
         )
 
     def route_ready(
         self,
-        node_ids: Iterable[int],
+        node_ids,
     ) -> bool:
-        ids = tuple(int(n) for n in node_ids)
-
-        return bool(ids) and all(
-            node_id in self._elevations
-            for node_id in ids
+        node_ids = list(
+            dict.fromkeys(
+                node_ids
+            )
         )
+
+        if not node_ids:
+            return True
+
+        with self._cache_lock:
+            return all(
+                self._node_key(
+                    node_id
+                ) in self._cache
+                for node_id in node_ids
+            )
 
     def route_progress(
         self,
-        node_ids: Iterable[int],
+        node_ids,
     ) -> tuple[int, int]:
-        ids = tuple(int(n) for n in node_ids)
-
-        ready = sum(
-            1
-            for node_id in ids
-            if node_id in self._elevations
+        unique = list(
+            dict.fromkeys(
+                node_ids
+            )
         )
 
-        return ready, len(ids)
+        with self._cache_lock:
+            ready = sum(
+                1
+                for node_id in unique
+                if self._node_key(
+                    node_id
+                ) in self._cache
+            )
+
+        return (
+            ready,
+            len(unique),
+        )
 
     def segment_grade_deg(
         self,
         segment,
         network,
-    ) -> Optional[float]:
-        start_elevation = self.elevation_m(
+    ) -> float | None:
+        z1 = self.elevation_for_node(
             segment.u
         )
-        end_elevation = self.elevation_m(
+        z2 = self.elevation_for_node(
             segment.v
         )
 
         if (
-            start_elevation is None
-            or end_elevation is None
+            z1 is None
+            or z2 is None
         ):
             return None
 
-        length_m = max(
-            float(segment.length),
-            1e-6,
+        length_m = float(
+            getattr(
+                segment,
+                "length",
+                0.0,
+            )
         )
 
-        rise_m = (
-            end_elevation
-            - start_elevation
-        )
+        if length_m <= 1e-9:
+            return 0.0
 
         return math.degrees(
             math.atan2(
-                rise_m,
+                z2 - z1,
                 length_m,
             )
         )
