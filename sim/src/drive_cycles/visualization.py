@@ -64,13 +64,17 @@ from traffic.intersection import Intersection
 from traffic.simulation import Simulation
 from traffic.vehicle import Vehicle
 from chunks.grid import CHUNK_SIZE, world_to_chunk, chunk_bounds
-from chunks.projection import local_bounds_to_latlon
+from chunks.projection import local_bounds_to_latlon, latlon_to_local
 from traffic.live_traffic import TomTomTrafficManager
 from drive_cycles.route_planner import Route, nearest_road_node, plan_route
 from drive_cycles.ego_vehicle import EgoVehicle
 from drive_cycles.drive_cycle_recorder import DriveCycleRecorder
 from drive_cycles.vehicle_config import VehicleDynamicsConfig, load_vehicle_config
 from drive_cycles.elevation_data import ElevationManager
+from drive_cycles.candidate_routes import CandidateRoute, plan_candidate_routes
+from drive_cycles.address_search import default_stuttgart_searcher
+from drive_cycles.address_route_service import nearest_drivable_node_latlon
+from drive_cycles.route_gui import RoutePlannerPanel, GuiAction
 
 # Anchor project/cache discovery to the module that already owns the cache
 # convention, not to wherever this viewer script happens to be copied.
@@ -117,6 +121,16 @@ ROUTE_LINE = (36, 94, 190)
 ROUTE_START = (40, 170, 80)
 ROUTE_END = (210, 65, 65)
 ROUTE_MARKER_EDGE = (250, 250, 250)
+ROUTE_CANDIDATE_COLORS = (
+    (36, 94, 190),
+    (140, 83, 190),
+    (35, 145, 135),
+    (202, 122, 36),
+    (170, 72, 92),
+)
+ROUTE_CANDIDATE_MUTED = (120, 125, 132)
+ADDRESS_CORRIDOR_RADIUS_CHUNKS = 1
+ADDRESS_PLAN_TIMEOUT_S = 60.0
 EGO_VEHICLE = (255, 80, 20)
 EGO_VEHICLE_EDGE = (255, 255, 255)
 
@@ -794,6 +808,28 @@ class TrafficVisualizer:
         self.selected_route: Optional[Route] = None
         self.route_status = "Left click a road to choose route start A"
 
+        # Interactive address/candidate-route planner.
+        self.route_gui = RoutePlannerPanel(
+            font=self.font,
+            small_font=self.small_font,
+        )
+        self.address_searcher = default_stuttgart_searcher(PROJECT_ROOT)
+        self.address_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="address-search",
+        )
+        self.address_future = None
+        self.address_plan_stage = "idle"
+        self.address_plan_started = 0.0
+        self.address_start_match = None
+        self.address_end_match = None
+        self.address_required_chunks: set[tuple[int, int]] = set()
+        self.address_start_xy: Optional[tuple[float, float]] = None
+        self.address_end_xy: Optional[tuple[float, float]] = None
+        self.candidate_routes: list[CandidateRoute] = []
+        self.selected_candidate_index: Optional[int] = None
+        self.candidate_count = 3
+
         self.ego_vehicle: Optional[EgoVehicle] = None
         self.drive_cycle_recorder: Optional[DriveCycleRecorder] = None
         self.last_drive_cycle_path: Optional[Path] = None
@@ -832,10 +868,25 @@ class TrafficVisualizer:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
-            elif event.type == pygame.VIDEORESIZE:
+                continue
+
+            if event.type == pygame.VIDEORESIZE:
                 self.screen = pygame.display.set_mode(event.size, pygame.RESIZABLE)
                 self.camera.resize(*event.size)
-            elif event.type == pygame.KEYDOWN:
+                continue
+
+            consumed, action = self.route_gui.handle_event(
+                event,
+                (self.camera.width, self.camera.height),
+            )
+
+            if action is not None:
+                self.handle_route_gui_action(action)
+
+            if consumed:
+                continue
+
+            if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     self.running = False
                 elif event.key == pygame.K_SPACE:
@@ -853,10 +904,19 @@ class TrafficVisualizer:
                     self.show_context = not self.show_context
                 elif event.key == pygame.K_v:
                     spawn_vehicles(self.network, self.simulation, 10, self.camera)
+                elif event.key == pygame.K_F2:
+                    self.route_gui.visible = not self.route_gui.visible
+                elif (
+                    pygame.K_1 <= event.key <= pygame.K_5
+                    and self.candidate_routes
+                ):
+                    candidate_index = event.key - pygame.K_0
+                    self.select_candidate_route(candidate_index)
                 elif event.key in (pygame.K_PLUS, pygame.K_EQUALS, pygame.K_KP_PLUS):
                     self.simulation.speed = min(32.0, self.simulation.speed * 2.0)
                 elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
                     self.simulation.speed = max(0.125, self.simulation.speed * 0.5)
+
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1:
                     self.select_route_point(event.pos)
@@ -869,19 +929,27 @@ class TrafficVisualizer:
                     self.camera.zoom_at(1.15, event.pos)
                 elif event.button == 5:
                     self.camera.zoom_at(1 / 1.15, event.pos)
+
             elif event.type == pygame.MOUSEBUTTONUP and event.button == 2:
                 self.dragging = False
+
             elif event.type == pygame.MOUSEMOTION and self.dragging:
                 dx = event.pos[0] - self.last_mouse[0]
                 dy = event.pos[1] - self.last_mouse[1]
                 self.camera.pan_pixels(dx, dy)
                 self.last_mouse = event.pos
+
             elif event.type == pygame.MOUSEWHEEL:
                 self.camera.zoom_at(1.15 ** event.y, pygame.mouse.get_pos())
+
+        # Do not pan the map while the user is typing an address.
+        if self.route_gui.text_input_active:
+            return
 
         keys = pygame.key.get_pressed()
         dt = 1.0 / max(self.clock.get_fps(), 30.0)
         speed = 650.0 / max(self.camera.pixels_per_meter, 0.01)
+
         if keys[pygame.K_a] or keys[pygame.K_LEFT]:
             self.camera.center_x -= speed * dt
         if keys[pygame.K_d] or keys[pygame.K_RIGHT]:
@@ -890,6 +958,416 @@ class TrafficVisualizer:
             self.camera.center_y += speed * dt
         if keys[pygame.K_s] or keys[pygame.K_DOWN]:
             self.camera.center_y -= speed * dt
+
+    def handle_route_gui_action(self, action: GuiAction) -> None:
+        if action.kind == "search":
+            self.begin_address_search()
+        elif action.kind == "select_candidate":
+            self.select_candidate_route(int(action.value))
+        elif action.kind == "drive_selected":
+            self.drive_selected_candidate()
+        elif action.kind == "clear":
+            self.clear_route_selection()
+
+    def begin_address_search(self) -> None:
+        start_query = self.route_gui.start_text.strip()
+        end_query = self.route_gui.end_text.strip()
+
+        if not start_query or not end_query:
+            self.route_gui.set_status(
+                "Enter both a start address and a destination.",
+                busy=False,
+            )
+            return
+
+        if self.address_future is not None and not self.address_future.done():
+            return
+
+        self.finish_drive_cycle("address_route_replaced")
+        self.drive_cycle_recorder = None
+        self.ego_vehicle = None
+        self.ego_waiting_for_elevation = False
+
+        self.route_start_node = None
+        self.route_end_node = None
+        self.selected_route = None
+        self.candidate_routes = []
+        self.selected_candidate_index = None
+        self.address_required_chunks.clear()
+        self.route_gui.clear_candidates()
+
+        self.address_plan_stage = "searching"
+        self.address_plan_started = time.monotonic()
+        self.route_gui.set_status(
+            "Searching Stuttgart addresses...",
+            busy=True,
+        )
+        self.route_status = "Address search in progress"
+
+        def worker():
+            start_results = self.address_searcher.search(
+                start_query,
+                limit=5,
+            )
+            end_results = self.address_searcher.search(
+                end_query,
+                limit=5,
+            )
+            return start_results, end_results
+
+        self.address_future = self.address_executor.submit(worker)
+
+    def _fit_camera_to_address_pair(
+        self,
+        start_xy: tuple[float, float],
+        end_xy: tuple[float, float],
+    ) -> None:
+        x1, y1 = start_xy
+        x2, y2 = end_xy
+
+        self.camera.center_x = 0.5 * (x1 + x2)
+        self.camera.center_y = 0.5 * (y1 + y2)
+
+        dx = max(300.0, abs(x2 - x1) + 700.0)
+        dy = max(300.0, abs(y2 - y1) + 700.0)
+
+        usable_width = max(
+            320,
+            self.camera.width - RoutePlannerPanel.WIDTH - 60,
+        )
+        usable_height = max(
+            280,
+            self.camera.height - 80,
+        )
+
+        ppm_x = usable_width / dx
+        ppm_y = usable_height / dy
+
+        self.camera.pixels_per_meter = max(
+            MIN_ZOOM,
+            min(
+                3.0,
+                ppm_x,
+                ppm_y,
+            ),
+        )
+
+    def _build_address_corridor_chunks(
+        self,
+        start_xy: tuple[float, float],
+        end_xy: tuple[float, float],
+    ) -> set[tuple[int, int]]:
+        x1, y1 = start_xy
+        x2, y2 = end_xy
+
+        distance = math.hypot(
+            x2 - x1,
+            y2 - y1,
+        )
+
+        steps = max(
+            1,
+            int(
+                math.ceil(
+                    distance
+                    / (CHUNK_SIZE * 0.75)
+                )
+            ),
+        )
+
+        keys: set[tuple[int, int]] = set()
+
+        for i in range(steps + 1):
+            alpha = i / steps
+            x = x1 + (x2 - x1) * alpha
+            y = y1 + (y2 - y1) * alpha
+
+            cx, cy = world_to_chunk(
+                x,
+                y,
+            )
+
+            for dx in range(
+                -ADDRESS_CORRIDOR_RADIUS_CHUNKS,
+                ADDRESS_CORRIDOR_RADIUS_CHUNKS + 1,
+            ):
+                for dy in range(
+                    -ADDRESS_CORRIDOR_RADIUS_CHUNKS,
+                    ADDRESS_CORRIDOR_RADIUS_CHUNKS + 1,
+                ):
+                    keys.add(
+                        (
+                            cx + dx,
+                            cy + dy,
+                        )
+                    )
+
+        # Give the endpoint neighborhoods a little extra room for snapping.
+        for x, y in (
+            start_xy,
+            end_xy,
+        ):
+            cx, cy = world_to_chunk(
+                x,
+                y,
+            )
+
+            for dx in range(-2, 3):
+                for dy in range(-2, 3):
+                    keys.add(
+                        (
+                            cx + dx,
+                            cy + dy,
+                        )
+                    )
+
+        return keys
+
+    def poll_address_planner(self) -> None:
+        if self.address_plan_stage == "searching":
+            if self.address_future is None or not self.address_future.done():
+                return
+
+            try:
+                start_results, end_results = self.address_future.result()
+            except Exception as exc:
+                self.address_plan_stage = "error"
+                self.route_gui.set_status(
+                    f"Address search failed: {exc}",
+                    busy=False,
+                )
+                self.route_status = f"Address search failed: {exc}"
+                return
+
+            if not start_results:
+                self.address_plan_stage = "error"
+                self.route_gui.set_status(
+                    "No Stuttgart match found for the start address.",
+                    busy=False,
+                )
+                return
+
+            if not end_results:
+                self.address_plan_stage = "error"
+                self.route_gui.set_status(
+                    "No Stuttgart match found for the destination.",
+                    busy=False,
+                )
+                return
+
+            self.address_start_match = start_results[0]
+            self.address_end_match = end_results[0]
+
+            self.route_gui.set_matches(
+                self.address_start_match.display_name,
+                self.address_end_match.display_name,
+            )
+
+            self.address_start_xy = latlon_to_local(
+                self.address_start_match.latitude,
+                self.address_start_match.longitude,
+            )
+
+            self.address_end_xy = latlon_to_local(
+                self.address_end_match.latitude,
+                self.address_end_match.longitude,
+            )
+
+            self._fit_camera_to_address_pair(
+                self.address_start_xy,
+                self.address_end_xy,
+            )
+
+            self.address_required_chunks = self._build_address_corridor_chunks(
+                self.address_start_xy,
+                self.address_end_xy,
+            )
+
+            self.address_plan_stage = "loading"
+            self.address_plan_started = time.monotonic()
+
+        if self.address_plan_stage != "loading":
+            return
+
+        for key in sorted(
+            self.address_required_chunks,
+            key=lambda item: (
+                abs(
+                    item[0]
+                    - world_to_chunk(
+                        self.camera.center_x,
+                        self.camera.center_y,
+                    )[0]
+                )
+                + abs(
+                    item[1]
+                    - world_to_chunk(
+                        self.camera.center_x,
+                        self.camera.center_y,
+                    )[1]
+                )
+            ),
+        ):
+            if len(self.chunks.pending_chunks) >= self.chunks.max_pending:
+                break
+            self.chunks.request_chunk(key)
+
+        loaded = len(
+            self.address_required_chunks
+            & self.chunks.loaded_chunks
+        )
+        total = len(
+            self.address_required_chunks
+        )
+
+        self.route_gui.set_status(
+            f"Loading road corridor: {loaded}/{total} chunks",
+            busy=True,
+        )
+
+        elapsed = (
+            time.monotonic()
+            - self.address_plan_started
+        )
+
+        ready_enough = (
+            total > 0
+            and loaded == total
+        )
+
+        timed_out = (
+            elapsed >= ADDRESS_PLAN_TIMEOUT_S
+        )
+
+        if not ready_enough and not timed_out:
+            return
+
+        try:
+            start_node, start_snap = nearest_drivable_node_latlon(
+                self.network,
+                self.address_start_match.latitude,
+                self.address_start_match.longitude,
+                maximum_distance_m=1500.0,
+            )
+
+            end_node, end_snap = nearest_drivable_node_latlon(
+                self.network,
+                self.address_end_match.latitude,
+                self.address_end_match.longitude,
+                maximum_distance_m=1500.0,
+            )
+
+            candidates = plan_candidate_routes(
+                self.network,
+                start_node,
+                end_node,
+                count=self.candidate_count,
+                cost_mode="time",
+                diversity_penalty=0.75,
+                max_overlap=0.92,
+                max_attempts=30,
+            )
+        except Exception as exc:
+            self.address_plan_stage = "error"
+            self.route_gui.set_status(
+                f"Could not plan address route: {exc}",
+                busy=False,
+            )
+            self.route_status = f"Address route failed: {exc}"
+            return
+
+        if not candidates:
+            self.address_plan_stage = "error"
+            self.route_gui.set_status(
+                "No directed route found. Try closer addresses or load more map area.",
+                busy=False,
+            )
+            self.route_status = "No directed address route found"
+            return
+
+        self.route_start_node = start_node
+        self.route_end_node = end_node
+        self.candidate_routes = list(candidates)
+        self.selected_candidate_index = 1
+        self.selected_route = candidates[0].route
+
+        gui_candidates = [
+            {
+                "index": candidate.candidate_index,
+                "distance_km": candidate.route.distance_m / 1000.0,
+                "time_min": candidate.route.estimated_time_s / 60.0,
+                "overlap": candidate.overlap_with_best,
+            }
+            for candidate in candidates
+        ]
+
+        self.route_gui.set_candidates(
+            gui_candidates
+        )
+        self.route_gui.select_candidate(
+            1
+        )
+        self.route_gui.set_status(
+            f"{len(candidates)} candidate routes ready. Select one, then Drive selected.",
+            busy=False,
+        )
+
+        self.route_status = (
+            f"{len(candidates)} address-route candidates ready; "
+            f"start snap {start_snap:.0f} m, end snap {end_snap:.0f} m"
+        )
+        self.address_plan_stage = "ready"
+
+    def select_candidate_route(
+        self,
+        candidate_index: int,
+    ) -> None:
+        candidate = next(
+            (
+                item
+                for item in self.candidate_routes
+                if item.candidate_index == candidate_index
+            ),
+            None,
+        )
+
+        if candidate is None:
+            return
+
+        if self.ego_vehicle is not None:
+            self.finish_drive_cycle("candidate_switched")
+
+        self.ego_vehicle = None
+        self.drive_cycle_recorder = None
+        self.ego_waiting_for_elevation = False
+
+        self.selected_candidate_index = candidate_index
+        self.selected_route = candidate.route
+        self.route_gui.select_candidate(
+            candidate_index
+        )
+
+        self.route_status = (
+            f"Candidate {candidate_index}: "
+            f"{candidate.route.distance_m / 1000.0:.2f} km, "
+            f"{candidate.route.estimated_time_s / 60.0:.1f} min - "
+            "press Drive selected"
+        )
+
+    def drive_selected_candidate(self) -> None:
+        if self.selected_route is None:
+            self.route_gui.set_status(
+                "Select a candidate route first.",
+                busy=False,
+            )
+            return
+
+        self.route_gui.set_status(
+            f"Preparing Route {self.selected_candidate_index} elevation...",
+            busy=True,
+        )
+
+        self.prepare_route_elevation()
 
     def load_selected_vehicle_config(self) -> None:
         try:
@@ -910,10 +1388,19 @@ class TrafficVisualizer:
         self.route_start_node = None
         self.route_end_node = None
         self.selected_route = None
+        self.candidate_routes = []
+        self.selected_candidate_index = None
+        self.address_required_chunks.clear()
+        self.address_plan_stage = "idle"
         self.ego_vehicle = None
         self.drive_cycle_recorder = None
         self.ego_waiting_for_elevation = False
         self.current_grade_deg = 0.0
+        self.route_gui.clear_candidates()
+        self.route_gui.set_status(
+            "Type Stuttgart addresses, or click A/B directly on the map.",
+            busy=False,
+        )
         self.route_status = "Left click a road to choose route start A"
 
     def select_route_point(self, screen_pos: tuple[int, int]) -> None:
@@ -934,6 +1421,11 @@ class TrafficVisualizer:
         if self.route_start_node is None or self.route_end_node is not None:
             self.finish_drive_cycle("route_replaced")
             self.drive_cycle_recorder = None
+            self.candidate_routes = []
+            self.selected_candidate_index = None
+            self.route_gui.clear_candidates()
+            self.address_plan_stage = "idle"
+            self.address_required_chunks.clear()
 
             self.route_start_node = node_id
             self.route_end_node = None
@@ -989,6 +1481,10 @@ class TrafficVisualizer:
             route.node_ids
         ):
             self.ego_waiting_for_elevation = False
+            self.route_gui.set_status(
+                f"Driving Route {self.selected_candidate_index or 1}...",
+                busy=False,
+            )
             self.spawn_ego_vehicle()
             return
 
@@ -1169,6 +1665,79 @@ class TrafficVisualizer:
                 center[1] - 24,
             ),
         )
+
+    def draw_candidate_routes(self) -> None:
+        if not self.candidate_routes:
+            return
+
+        for candidate in self.candidate_routes:
+            route = candidate.route
+
+            if len(route.node_ids) < 2:
+                continue
+
+            points = []
+
+            for node_id in route.node_ids:
+                node = self.network.nodes.get(
+                    node_id
+                )
+
+                if node is not None:
+                    points.append(
+                        self.camera.world_to_screen(
+                            node.x,
+                            node.y,
+                        )
+                    )
+
+            if len(points) < 2:
+                continue
+
+            selected = (
+                candidate.candidate_index
+                == self.selected_candidate_index
+            )
+
+            color = (
+                ROUTE_CANDIDATE_COLORS[
+                    (candidate.candidate_index - 1)
+                    % len(ROUTE_CANDIDATE_COLORS)
+                ]
+                if selected
+                else ROUTE_CANDIDATE_MUTED
+            )
+
+            width = (
+                max(
+                    4,
+                    int(
+                        4
+                        * min(
+                            self.camera.pixels_per_meter,
+                            2.0,
+                        )
+                    ),
+                )
+                if selected
+                else 2
+            )
+
+            pygame.draw.lines(
+                self.screen,
+                (248, 248, 248),
+                False,
+                points,
+                width + 2,
+            )
+
+            pygame.draw.lines(
+                self.screen,
+                color,
+                False,
+                points,
+                width,
+            )
 
     def draw_selected_route(self) -> None:
         route = self.selected_route
@@ -1547,6 +2116,7 @@ class TrafficVisualizer:
             f"Traffic x    {getattr(self.simulation, 'traffic_speed_factor', 1.0):7.2f}",
             "",
             "WASD pan   middle-drag pan   wheel zoom",
+            "Address GUI top-right   F2 toggle panel",
             "Left click A/B   right click clear route",
             "L labels   B buildings   G grid",
             "V +10 cars   R Stuttgart origin",
@@ -1624,6 +2194,7 @@ class TrafficVisualizer:
             self.maybe_spawn_initial()
 
             self.elevation.poll()
+            self.poll_address_planner()
 
             if (
                 self.ego_waiting_for_elevation
@@ -1635,6 +2206,10 @@ class TrafficVisualizer:
                     route.node_ids
                 ):
                     self.ego_waiting_for_elevation = False
+                    self.route_gui.set_status(
+                        f"Driving Route {self.selected_candidate_index or 1}...",
+                        busy=False,
+                    )
                     self.spawn_ego_vehicle()
                 else:
                     ready, total = self.elevation.route_progress(
@@ -1696,6 +2271,10 @@ class TrafficVisualizer:
                                 "Ego arrived - saved "
                                 f"{self.last_drive_cycle_path.name}"
                             )
+                            self.route_gui.set_status(
+                                f"Route finished: {self.last_drive_cycle_path.name}",
+                                busy=False,
+                            )
                         else:
                             self.route_status = (
                                 "Ego vehicle arrived at destination B"
@@ -1704,15 +2283,18 @@ class TrafficVisualizer:
                 self.refresh_signal_cache()
 
             self.screen.blit(self.get_static_map(), (0, 0))
+            self.draw_candidate_routes()
             self.draw_selected_route()
             self.draw_lights()
             self.draw_vehicles()
             self.draw_ego_vehicle()
             self.draw_stream_status()
             self.draw_hud()
+            self.route_gui.draw(self.screen)
             pygame.display.flip()
 
         self.finish_drive_cycle("application_shutdown")
+        self.address_executor.shutdown(wait=False, cancel_futures=True)
         self.elevation.close()
         self.live_traffic.close()
         self.chunks.close()
