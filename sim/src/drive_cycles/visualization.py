@@ -139,6 +139,17 @@ MIN_ZOOM = 0.15
 MAX_ZOOM = 25.0
 DEFAULT_PPM = 2.2
 
+# Streaming/render performance controls.
+# Keep these conservative: the road graph remains available for routing, while
+# expensive visual chunk data is retained only around the current view.
+MAX_VIEW_STREAM_CHUNKS = 180
+CHUNK_UNLOAD_INTERVAL_S = 1.0
+STATIC_REBUILD_SETTLE_S = 0.18
+INTERSECTION_REBUILD_SETTLE_S = 0.85
+INTERSECTION_REBUILD_MIN_INTERVAL_S = 2.0
+BACKGROUND_CULL_INTERVAL_S = 1.0
+BACKGROUND_CULL_VIEW_MULTIPLIER = 2.25
+
 # The viewer never talks to Overpass directly. Missing chunks are handed to
 # the project's project get_chunk cache/downloader (when one is discoverable/configured) and
 # all data is consumed through the shared cache directory.
@@ -398,7 +409,17 @@ class OSMChunkManager:
         self.requested_chunks = set()
         self.visuals = {}
         self.road_ids_by_chunk = {}
+        self.segments_by_road_id = defaultdict(list)
         self.revision = 0
+
+        # "loaded_chunks" means actively retained visual chunks. The routing
+        # graph is intentionally allowed to retain already-seen roads/nodes so
+        # candidate routes do not disappear when map visuals are evicted.
+        self.pinned_chunks = set()
+        self.last_merge_monotonic = 0.0
+        self.intersections_dirty = False
+        self._last_intersection_rebuild = 0.0
+        self._next_unload = 0.0
         self.generated_last_update = 0
         self.downloads_last_update = 0
         self.last_error = ""
@@ -436,25 +457,66 @@ class OSMChunkManager:
         min_y, max_y = sorted((p1[1], p2[1]))
         min_cx, min_cy = world_to_chunk(min_x, min_y)
         max_cx, max_cy = world_to_chunk(max_x, max_y)
-        result = [(cx, cy)
-                  for cx in range(min_cx - CHUNK_MARGIN, max_cx + CHUNK_MARGIN + 1)
-                  for cy in range(min_cy - CHUNK_MARGIN, max_cy + CHUNK_MARGIN + 1)]
+        result = [
+            (cx, cy)
+            for cx in range(min_cx - CHUNK_MARGIN, max_cx + CHUNK_MARGIN + 1)
+            for cy in range(min_cy - CHUNK_MARGIN, max_cy + CHUNK_MARGIN + 1)
+        ]
         center = world_to_chunk(camera.center_x, camera.center_y)
         result.sort(key=lambda c: abs(c[0]-center[0]) + abs(c[1]-center[1]))
+
+        # At city-scale zoom levels, requesting every mathematically visible
+        # 250 m chunk can explode into hundreds/thousands of cache jobs. Render
+        # the nearest chunk budget instead. Address-route corridor loading is
+        # separately pinned and is not limited by this view budget.
+        if len(result) > MAX_VIEW_STREAM_CHUNKS:
+            result = result[:MAX_VIEW_STREAM_CHUNKS]
+
         return result
+
+    def set_pinned_chunks(self, keys) -> None:
+        self.pinned_chunks = set(keys)
+
+    def unload_distant_visual_chunks(self, camera: Camera) -> int:
+        now = time.monotonic()
+        if now < self._next_unload:
+            return 0
+        self._next_unload = now + CHUNK_UNLOAD_INTERVAL_S
+
+        keep = set(self.chunks_for_view(camera))
+        keep.update(self.pinned_chunks)
+
+        removable = [
+            key
+            for key in self.loaded_chunks
+            if key not in keep
+        ]
+
+        if not removable:
+            return 0
+
+        for key in removable:
+            self.loaded_chunks.discard(key)
+            self.visuals.pop(key, None)
+            self.road_ids_by_chunk.pop(key, None)
+
+        # The route graph is deliberately retained. Only render/cache integration
+        # state is evicted, which is safe for existing Route/EgoVehicle objects.
+        self.revision += 1
+        return len(removable)
 
     def chunk_path(self, cx: int, cy: int) -> Path:
         # download_chunk.py owns the path convention.
         return self.downloader.path_for(cx, cy)
 
     def _cache_ready_worker(self, key) -> None:
-        """Validate a cached chunk off-thread, then queue it for integration."""
+        """Parse a cached chunk off-thread, then queue the parsed XML root."""
         path = self.chunk_path(*key)
         try:
-            ET.parse(path)
-            self.completed.put((key, "cache", ""))
+            root = ET.parse(path).getroot()
+            self.completed.put((key, "cache", "", root))
         except Exception as exc:
-            self.completed.put((key, "cache", f"Invalid cached chunk {path.name}: {exc}"))
+            self.completed.put((key, "cache", f"Invalid cached chunk {path.name}: {exc}", None))
 
     def _downloader_worker(self, key) -> None:
         """Run the supplied get_chunk(cx, cy) off the Pygame thread."""
@@ -462,16 +524,16 @@ class OSMChunkManager:
         try:
             path = self.chunk_path(cx, cy)
             if path.exists():
-                ET.parse(path)
-                self.completed.put((key, "cache", ""))
+                root = ET.parse(path).getroot()
+                self.completed.put((key, "cache", "", root))
                 return
 
             # This is the exact supplied cache/download/save logic.
             path = self.downloader.request(cx, cy)
-            ET.parse(path)
-            self.completed.put((key, "downloader", ""))
+            root = ET.parse(path).getroot()
+            self.completed.put((key, "downloader", "", root))
         except Exception as exc:
-            self.completed.put((key, "downloader", f"get_chunk failed for {cx},{cy}: {exc}"))
+            self.completed.put((key, "downloader", f"get_chunk failed for {cx},{cy}: {exc}", None))
 
     def request_chunk(self, key) -> bool:
         if key in self.loaded_chunks or key in self.queued_chunks or key in self.pending_chunks:
@@ -545,6 +607,7 @@ class OSMChunkManager:
             road = self.network.roads.get(road_id)
             if road is None:
                 continue
+            road_segments = self.segments_by_road_id[road_id]
             for i in range(len(road.nodes)-1):
                 u, v = road.nodes[i], road.nodes[i+1]
                 if u not in self.network.nodes or v not in self.network.nodes:
@@ -556,6 +619,7 @@ class OSMChunkManager:
                     seg.length = math.hypot(nb.x-na.x, nb.y-na.y)
                     self.network.segments.append(seg)
                     self.network.outgoing.setdefault(a, []).append(seg)
+                    road_segments.append(seg)
 
     def _rebuild_intersections_fast(self) -> None:
         self.network.traffic_lights = {
@@ -603,12 +667,14 @@ class OSMChunkManager:
                 intersections.append(inter)
         self.network.intersections = intersections
 
-    def merge_osm_file(self, path: Path, chunk_key) -> None:
-        root = ET.parse(path).getroot()
+    def merge_osm_root(self, root, chunk_key) -> None:
         old_ids = set(self.network.roads)
         self.network.load_nodes(root)
         self.network.load_roads(root)
-        self._append_road_segments(set(self.network.roads) - old_ids)
+
+        new_road_ids = set(self.network.roads) - old_ids
+        self._append_road_segments(new_road_ids)
+
         road_ids = set()
         for way in root.findall("way"):
             tags = {t.attrib.get("k"): t.attrib.get("v", "") for t in way.findall("tag")}
@@ -617,15 +683,56 @@ class OSMChunkManager:
                     road_ids.add(int(way.attrib["id"]))
                 except (KeyError, ValueError):
                     pass
+
         self.road_ids_by_chunk[chunk_key] = road_ids
         self.visuals[chunk_key] = self.parse_visuals(root)
+
+        # Register newly visible traffic-light objects cheaply now. Rebuilding
+        # the complete intersection topology after every individual chunk is one
+        # of the largest causes of frame stalls, so that work is deferred.
+        found_signal = False
+        for node_element in root.findall("node"):
+            try:
+                node_id = int(node_element.attrib["id"])
+            except (KeyError, ValueError):
+                continue
+            node = self.network.nodes.get(node_id)
+            if node is not None and getattr(node, "traffic_light", False):
+                if node_id not in self.network.traffic_lights:
+                    self.network.traffic_lights[node_id] = TrafficLight(node_id)
+                found_signal = True
+
+        if found_signal or new_road_ids:
+            self.intersections_dirty = True
+
+        self.last_merge_monotonic = time.monotonic()
+
+    def maybe_rebuild_intersections(self) -> bool:
+        if not self.intersections_dirty:
+            return False
+
+        now = time.monotonic()
+
+        # Wait for a burst of chunk integrations to settle. Also avoid doing this
+        # while more completed chunks are waiting, otherwise each chunk burst can
+        # trigger repeated whole-network rebuilds.
+        if now - self.last_merge_monotonic < INTERSECTION_REBUILD_SETTLE_S:
+            return False
+        if now - self._last_intersection_rebuild < INTERSECTION_REBUILD_MIN_INTERVAL_S:
+            return False
+        if not self.completed.empty():
+            return False
+
         self._rebuild_intersections_fast()
+        self.intersections_dirty = False
+        self._last_intersection_rebuild = now
+        return True
 
     def _drain_completed(self):
         merged = downloader_hits = 0
         for _ in range(self.max_merges_per_frame):
             try:
-                key, source, error = self.completed.get_nowait()
+                key, source, error, root = self.completed.get_nowait()
             except queue.Empty:
                 break
             self.pending_chunks.discard(key)
@@ -649,10 +756,10 @@ class OSMChunkManager:
                 self.status_events.appendleft((time.monotonic(), f"Waiting/retry {key[0]},{key[1]}{suffix}"))
                 continue
             path = self.chunk_path(*key)
-            if not path.exists():
+            if not path.exists() or root is None:
                 continue
             try:
-                self.merge_osm_file(path, key)
+                self.merge_osm_root(root, key)
                 self.loaded_chunks.add(key)
                 merged += 1
                 downloader_hits += int(source == "downloader")
@@ -681,6 +788,9 @@ class OSMChunkManager:
             self.request_chunk(key)
         self.generated_last_update = loaded
         self.downloads_last_update = downloader_hits
+
+        self.unload_distant_visual_chunks(camera)
+        self.maybe_rebuild_intersections()
 
         if not self.downloader.available and not self.offline and self.downloader.error:
             self.last_error = self.downloader.error + f" | cache={self.cache_dir}"
@@ -824,6 +934,7 @@ class TrafficVisualizer:
         self.address_start_match = None
         self.address_end_match = None
         self.address_required_chunks: set[tuple[int, int]] = set()
+        self.address_chunk_order: list[tuple[int, int]] = []
         self.address_start_xy: Optional[tuple[float, float]] = None
         self.address_end_xy: Optional[tuple[float, float]] = None
         self.candidate_routes: list[CandidateRoute] = []
@@ -846,8 +957,11 @@ class TrafficVisualizer:
         self.simulation._signal_state_cache = {}
         self._visible_chunk_keys: list[tuple[int, int]] = []
         self._visible_road_ids: set[int] = set()
+        self._visible_key = None
         self._static_surface: Optional[pygame.Surface] = None
-        self._static_key = None
+        self._static_camera_key = None
+        self._static_revision = -1
+        self._next_background_cull = 0.0
         self._rotated_label_cache: dict[tuple[str, int], tuple[pygame.Surface, pygame.Surface]] = {}
 
         # Queue nearby chunks immediately; network I/O is asynchronous.
@@ -994,6 +1108,8 @@ class TrafficVisualizer:
         self.candidate_routes = []
         self.selected_candidate_index = None
         self.address_required_chunks.clear()
+        self.address_chunk_order.clear()
+        self.chunks.set_pinned_chunks(())
         self.route_gui.clear_candidates()
 
         self.address_plan_stage = "searching"
@@ -1183,31 +1299,28 @@ class TrafficVisualizer:
                 self.address_end_xy,
             )
 
+            center_chunk = world_to_chunk(
+                self.camera.center_x,
+                self.camera.center_y,
+            )
+            self.address_chunk_order = sorted(
+                self.address_required_chunks,
+                key=lambda item: (
+                    abs(item[0] - center_chunk[0])
+                    + abs(item[1] - center_chunk[1])
+                ),
+            )
+            self.chunks.set_pinned_chunks(
+                self.address_required_chunks
+            )
+
             self.address_plan_stage = "loading"
             self.address_plan_started = time.monotonic()
 
         if self.address_plan_stage != "loading":
             return
 
-        for key in sorted(
-            self.address_required_chunks,
-            key=lambda item: (
-                abs(
-                    item[0]
-                    - world_to_chunk(
-                        self.camera.center_x,
-                        self.camera.center_y,
-                    )[0]
-                )
-                + abs(
-                    item[1]
-                    - world_to_chunk(
-                        self.camera.center_x,
-                        self.camera.center_y,
-                    )[1]
-                )
-            ),
-        ):
+        for key in self.address_chunk_order:
             if len(self.chunks.pending_chunks) >= self.chunks.max_pending:
                 break
             self.chunks.request_chunk(key)
@@ -1317,6 +1430,7 @@ class TrafficVisualizer:
             f"start snap {start_snap:.0f} m, end snap {end_snap:.0f} m"
         )
         self.address_plan_stage = "ready"
+        self.chunks.set_pinned_chunks(())
 
     def select_candidate_route(
         self,
@@ -1391,6 +1505,8 @@ class TrafficVisualizer:
         self.candidate_routes = []
         self.selected_candidate_index = None
         self.address_required_chunks.clear()
+        self.address_chunk_order.clear()
+        self.chunks.set_pinned_chunks(())
         self.address_plan_stage = "idle"
         self.ego_vehicle = None
         self.drive_cycle_recorder = None
@@ -1778,11 +1894,42 @@ class TrafficVisualizer:
         self.screen.blit(text, text.get_rect(center=point))
 
     def refresh_visible_sets(self) -> None:
+        key = (
+            round(self.camera.center_x, 2),
+            round(self.camera.center_y, 2),
+            round(self.camera.pixels_per_meter, 4),
+            self.camera.width,
+            self.camera.height,
+            self.chunks.revision,
+        )
+
+        if key == self._visible_key:
+            return
+
+        self._visible_key = key
         self._visible_chunk_keys = self.chunks.chunks_for_view(self.camera)
+
         ids: set[int] = set()
-        for key in self._visible_chunk_keys:
-            ids.update(self.chunks.road_ids_by_chunk.get(key, ()))
+        for chunk_key in self._visible_chunk_keys:
+            ids.update(
+                self.chunks.road_ids_by_chunk.get(
+                    chunk_key,
+                    (),
+                )
+            )
         self._visible_road_ids = ids
+
+        # Spawn only from currently relevant roads instead of scanning the full
+        # accumulated Stuttgart graph every time traffic density changes.
+        visible_segments = []
+        for road_id in ids:
+            visible_segments.extend(
+                self.chunks.segments_by_road_id.get(
+                    road_id,
+                    (),
+                )
+            )
+        self.network._spawn_segments_hint = visible_segments
 
     def refresh_signal_cache(self) -> None:
         cache = {}
@@ -1802,28 +1949,54 @@ class TrafficVisualizer:
                 cache[node_id] = b
         self.simulation._signal_state_cache = cache
 
-    def static_map_key(self):
-        # Exact camera state gives perfect visuals while still making the common
-        # stationary-camera case essentially free after the first frame.
+    def static_camera_key(self):
         return (
-            self.camera.width, self.camera.height,
-            round(self.camera.center_x, 4), round(self.camera.center_y, 4),
-            round(self.camera.pixels_per_meter, 5), self.chunks.revision,
-            self.show_context, self.show_labels, self.show_grid,
+            self.camera.width,
+            self.camera.height,
+            round(self.camera.center_x, 3),
+            round(self.camera.center_y, 3),
+            round(self.camera.pixels_per_meter, 5),
+            self.show_context,
+            self.show_labels,
+            self.show_grid,
         )
 
     def get_static_map(self) -> pygame.Surface:
-        key = self.static_map_key()
-        if self._static_surface is not None and key == self._static_key:
+        camera_key = self.static_camera_key()
+        camera_changed = camera_key != self._static_camera_key
+        revision_changed = self.chunks.revision != self._static_revision
+
+        if (
+            self._static_surface is not None
+            and not camera_changed
+            and not revision_changed
+        ):
             return self._static_surface
-        surface = pygame.Surface((self.camera.width, self.camera.height)).convert()
+
+        # When several chunks complete in quick succession, keep displaying the
+        # previous static surface for a fraction of a second. This avoids
+        # redrawing every building/road/label once per newly merged chunk.
+        if (
+            self._static_surface is not None
+            and not camera_changed
+            and revision_changed
+            and time.monotonic() - self.chunks.last_merge_monotonic
+            < STATIC_REBUILD_SETTLE_S
+        ):
+            return self._static_surface
+
+        surface = pygame.Surface(
+            (self.camera.width, self.camera.height)
+        ).convert()
         surface.fill(BACKGROUND)
         self.draw_context(surface)
         self.draw_roads(surface)
         self.draw_street_labels(surface)
         self.draw_grid(surface)
+
         self._static_surface = surface
-        self._static_key = key
+        self._static_camera_key = camera_key
+        self._static_revision = self.chunks.revision
         return surface
 
     def draw_context(self, surface: Optional[pygame.Surface] = None) -> None:
@@ -1950,6 +2123,55 @@ class TrafficVisualizer:
         for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
             surface.blit(halo, halo.get_rect(center=(rect.centerx + dx, rect.centery + dy)))
         surface.blit(fg, rect)
+
+    def cull_background_vehicles(self) -> None:
+        now = time.monotonic()
+        if now < self._next_background_cull:
+            return
+        self._next_background_cull = now + BACKGROUND_CULL_INTERVAL_S
+
+        if not self.simulation.vehicles:
+            return
+
+        half_w_m = (
+            self.camera.width
+            / max(self.camera.pixels_per_meter, 0.01)
+            * 0.5
+            * BACKGROUND_CULL_VIEW_MULTIPLIER
+        )
+        half_h_m = (
+            self.camera.height
+            / max(self.camera.pixels_per_meter, 0.01)
+            * 0.5
+            * BACKGROUND_CULL_VIEW_MULTIPLIER
+        )
+
+        min_x = self.camera.center_x - half_w_m
+        max_x = self.camera.center_x + half_w_m
+        min_y = self.camera.center_y - half_h_m
+        max_y = self.camera.center_y + half_h_m
+
+        kept = []
+        for vehicle in self.simulation.vehicles:
+            try:
+                x, y = vehicle.get_position()
+            except Exception:
+                continue
+
+            if min_x <= x <= max_x and min_y <= y <= max_y:
+                kept.append(vehicle)
+
+        # Do not aggressively empty traffic at extreme zoom/pan transitions.
+        minimum_keep = min(
+            len(self.simulation.vehicles),
+            max(5, self._traffic_target_vehicles // 3),
+        )
+
+        if len(kept) < minimum_keep:
+            return
+
+        if len(kept) != len(self.simulation.vehicles):
+            self.simulation.vehicles[:] = kept
 
     def signal_state(self, node_id: int) -> Optional[str]:
         return self.simulation._signal_state_cache.get(node_id)
@@ -2108,7 +2330,7 @@ class TrafficVisualizer:
             "STUTTGART / OPENSTREETMAP",
             f"FPS          {self.fps:5.1f}",
             f"Chunk        {chunk[0]:4d}, {chunk[1]:4d}",
-            f"Cached/load  {len(self.chunks.loaded_chunks):7d} chunks",
+            f"Active chunks {len(self.chunks.loaded_chunks):6d}",
             f"Road ways    {len(self.network.roads):7d}",
             f"Vehicles     {len(self.simulation.vehicles):7d}",
             f"Avg speed    {avg * 3.6:7.1f} km/h",
@@ -2185,7 +2407,7 @@ class TrafficVisualizer:
 
     def run(self) -> None:
         while self.running:
-            dt = min(self.clock.tick(60) / 1000.0, 0.1)
+            dt = min(self.clock.tick(120) / 1000.0, 0.1)
             self.fps = self.clock.get_fps()
             self.handle_events()
 
@@ -2219,6 +2441,8 @@ class TrafficVisualizer:
                         f"Loading route elevation: "
                         f"{ready}/{total} nodes ready"
                     )
+
+            self.cull_background_vehicles()
 
             traffic = self.live_traffic.update(self.camera)
             if traffic is not None:
@@ -2306,7 +2530,22 @@ class TrafficVisualizer:
 # -----------------------------------------------------------------------------
 def valid_spawn_segments(network: RoadNetwork, camera: Optional[Camera] = None) -> list:
     out = []
-    for segment in network.segments:
+
+    if camera is not None:
+        hinted = getattr(
+            network,
+            "_spawn_segments_hint",
+            None,
+        )
+        source_segments = (
+            hinted
+            if hinted
+            else network.segments
+        )
+    else:
+        source_segments = network.segments
+
+    for segment in source_segments:
         if segment.length <= 2 or segment.u not in network.nodes or segment.v not in network.nodes:
             continue
         if camera is not None:
