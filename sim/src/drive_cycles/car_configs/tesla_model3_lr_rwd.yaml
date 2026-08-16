@@ -40,6 +40,22 @@ mosfet:
   tj_reference_c: 25.0
   tj_max_c: 200.0
 
+  thermal:
+    rth_jc_c_per_w: 0.42
+    rth_case_to_coolant_c_per_w: 0.05
+    foster_rc_pairs:
+      - rth_c_per_w: 0.0216
+        tau_s: 0.000077
+      - rth_c_per_w: 0.0703
+        tau_s: 0.001554
+      - rth_c_per_w: 0.1668
+        tau_s: 0.016634
+      - rth_c_per_w: 0.1613
+        tau_s: 0.142761
+    max_iterations: 30
+    convergence_tolerance_c: 0.01
+    relaxation: 0.5
+
 cooling:
   coolant_inlet_temp_c: 65.0
 

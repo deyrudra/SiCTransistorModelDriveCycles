@@ -2,7 +2,7 @@
 
 As of now, we have the drive cycle -> power mission profile (dc_power, etc).
 
-Now we want to take the dc power demand and convert it into inverter current 
+Now we want to take the dc power demand and convert it into inverter current to get the total semiconductor loss.
 
 For every sample, this next stage should calculate:
 
