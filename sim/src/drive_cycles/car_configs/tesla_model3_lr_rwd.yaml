@@ -63,3 +63,12 @@ reliability:
   model: coffin_manson_arrhenius
   calibrated: false
   calibration_source: null
+
+  # Relative-damage normalization parameters.
+  # These are placeholders until calibrated against device-specific
+  # SiC power-cycling measurements.
+  delta_t_reference_c: 40.0
+  mean_tj_reference_c: 100.0
+  coffin_manson_exponent: 5.0
+  activation_energy_ev: 0.7
+  minimum_delta_t_c: 0.01
