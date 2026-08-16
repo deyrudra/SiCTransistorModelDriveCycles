@@ -1,6 +1,6 @@
 # Multiple Route Comparison
 
-This will compare the routes provided the `*_summary.json` using normalized: time, net DC Energy, Relative SiC Damage. The lower score is better.
+This will compare the routes provided the `*_summary.json` using normalized: time, net DC Energy, Relative SiC Damage. **The lower score is better**.
 
 The default weights are:
 
