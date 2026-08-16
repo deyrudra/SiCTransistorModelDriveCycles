@@ -75,6 +75,8 @@ from drive_cycles.candidate_routes import CandidateRoute, plan_candidate_routes
 from drive_cycles.address_search import default_stuttgart_searcher
 from drive_cycles.address_route_service import nearest_drivable_node_latlon
 from drive_cycles.route_gui import RoutePlannerPanel, GuiAction
+from drive_cycles.fast_scenario_builder import build_candidate_scenarios
+from drive_cycles.parallel_route_simulation import run_parallel_scenarios
 
 # Anchor project/cache discovery to the module that already owns the cache
 # convention, not to wherever this viewer script happens to be copied.
@@ -930,6 +932,17 @@ class TrafficVisualizer:
         )
         self.address_future = None
         self.address_plan_stage = "idle"
+
+        # Parallel headless route evaluation. The manager runs in a background
+        # thread so Pygame remains responsive while child processes use CPU cores.
+        self.batch_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="parallel-route-manager",
+        )
+        self.batch_future = None
+        self.batch_state = "idle"
+        self.batch_results = []
+        self.batch_started_wall = 0.0
         self.address_plan_started = 0.0
         self.address_start_match = None
         self.address_end_match = None
@@ -1020,6 +1033,8 @@ class TrafficVisualizer:
                     spawn_vehicles(self.network, self.simulation, 10, self.camera)
                 elif event.key == pygame.K_F2:
                     self.route_gui.visible = not self.route_gui.visible
+                elif event.key == pygame.K_F5:
+                    self.begin_parallel_candidate_evaluation()
                 elif (
                     pygame.K_1 <= event.key <= pygame.K_5
                     and self.candidate_routes
@@ -1072,6 +1087,207 @@ class TrafficVisualizer:
             self.camera.center_y += speed * dt
         if keys[pygame.K_s] or keys[pygame.K_DOWN]:
             self.camera.center_y -= speed * dt
+
+    def begin_parallel_candidate_evaluation(self) -> None:
+        if not self.candidate_routes:
+            self.route_gui.set_status(
+                "Generate candidate routes first, then press F5.",
+                busy=False,
+            )
+            self.route_status = "Parallel evaluation needs candidate routes"
+            return
+
+        if self.batch_state in {"waiting_elevation", "running"}:
+            return
+
+        # Stop an interactive ego run before benchmarking routes. The parallel
+        # workers are independent simulations and should not compete with a live
+        # foreground drive for CPU.
+        if self.ego_vehicle is not None:
+            self.finish_drive_cycle("parallel_evaluation_started")
+            self.ego_vehicle = None
+            self.drive_cycle_recorder = None
+
+        all_node_ids = []
+        seen = set()
+
+        for candidate in self.candidate_routes:
+            for node_id in candidate.route.node_ids:
+                if node_id not in seen:
+                    seen.add(node_id)
+                    all_node_ids.append(node_id)
+
+        self.elevation.request_nodes(
+            self.network,
+            all_node_ids,
+        )
+
+        self.batch_state = "waiting_elevation"
+        self.batch_results = []
+        self.batch_started_wall = time.perf_counter()
+
+        self.route_gui.set_status(
+            "F5 batch: preloading elevation for all candidate routes...",
+            busy=True,
+        )
+        self.route_status = (
+            f"Parallel evaluation: preparing {len(self.candidate_routes)} routes"
+        )
+
+    def _launch_parallel_candidate_workers(self) -> None:
+        try:
+            scenarios = build_candidate_scenarios(
+                candidates=self.candidate_routes,
+                network=self.network,
+                chunk_manager=self.chunks,
+                vehicle_config_path=DEFAULT_CAR_CONFIG,
+                elevation_cache_path=DEFAULT_ELEVATION_CACHE,
+                output_dir=DEFAULT_DRIVE_CYCLE_DIR,
+                fixed_dt_s=0.05,
+                background_vehicle_count=max(
+                    0,
+                    int(self._traffic_target_vehicles),
+                ),
+                traffic_speed_factor=getattr(
+                    self.simulation,
+                    "traffic_speed_factor",
+                    1.0,
+                ),
+                random_seed=7,
+                halo_chunks=1,
+            )
+        except Exception as exc:
+            self.batch_state = "error"
+            self.route_gui.set_status(
+                f"Parallel setup failed: {exc}",
+                busy=False,
+            )
+            self.route_status = f"Parallel setup failed: {exc}"
+            return
+
+        self.batch_state = "running"
+        self.route_gui.set_status(
+            f"Running {len(scenarios)} fixed-step route simulations in parallel...",
+            busy=True,
+        )
+        self.route_status = (
+            f"Parallel route simulation running: {len(scenarios)} workers max"
+        )
+
+        self.batch_future = self.batch_executor.submit(
+            run_parallel_scenarios,
+            scenarios,
+        )
+
+    def poll_parallel_candidate_evaluation(self) -> None:
+        if self.batch_state == "waiting_elevation":
+            ready_routes = 0
+
+            for candidate in self.candidate_routes:
+                if self.elevation.route_ready(
+                    candidate.route.node_ids
+                ):
+                    ready_routes += 1
+
+            total_routes = len(
+                self.candidate_routes
+            )
+
+            self.route_gui.set_status(
+                f"F5 batch: elevation ready {ready_routes}/{total_routes} routes",
+                busy=True,
+            )
+
+            if ready_routes == total_routes:
+                self._launch_parallel_candidate_workers()
+
+            return
+
+        if self.batch_state != "running":
+            return
+
+        if self.batch_future is None or not self.batch_future.done():
+            elapsed = (
+                time.perf_counter()
+                - self.batch_started_wall
+            )
+            self.route_status = (
+                f"Parallel route simulations running - wall {elapsed:.1f}s"
+            )
+            return
+
+        try:
+            self.batch_results = self.batch_future.result()
+        except Exception as exc:
+            self.batch_state = "error"
+            self.route_gui.set_status(
+                f"Parallel simulation failed: {exc}",
+                busy=False,
+            )
+            self.route_status = f"Parallel simulation failed: {exc}"
+            return
+
+        self.batch_state = "done"
+
+        succeeded = [
+            result
+            for result in self.batch_results
+            if result.success
+        ]
+
+        failed = [
+            result
+            for result in self.batch_results
+            if not result.success
+        ]
+
+        elapsed = (
+            time.perf_counter()
+            - self.batch_started_wall
+        )
+
+        if succeeded:
+            fastest = max(
+                succeeded,
+                key=lambda result: result.realtime_factor,
+            )
+
+            message = (
+                f"Parallel done: {len(succeeded)}/{len(self.batch_results)} routes, "
+                f"best execution {fastest.realtime_factor:.1f}x realtime"
+            )
+        else:
+            message = (
+                f"Parallel finished with {len(failed)} failures"
+            )
+
+        self.route_gui.set_status(
+            message,
+            busy=False,
+        )
+
+        self.route_status = (
+            f"{message}; wall {elapsed:.1f}s"
+        )
+
+        print()
+        print("[parallel-route] results")
+
+        for result in self.batch_results:
+            if result.success:
+                print(
+                    f"  Route {result.route_index}: "
+                    f"{result.simulated_time_s:.2f}s simulated in "
+                    f"{result.wall_time_s:.2f}s wall "
+                    f"({result.realtime_factor:.1f}x), "
+                    f"arrived={result.arrived}, "
+                    f"cycle={result.drive_cycle_path}"
+                )
+            else:
+                print(
+                    f"  Route {result.route_index}: FAILED - "
+                    f"{result.error}"
+                )
 
     def handle_route_gui_action(self, action: GuiAction) -> None:
         if action.kind == "search":
@@ -2339,6 +2555,7 @@ class TrafficVisualizer:
             "",
             "WASD pan   middle-drag pan   wheel zoom",
             "Address GUI top-right   F2 toggle panel",
+            "F5 evaluate ALL candidate routes in parallel",
             "Left click A/B   right click clear route",
             "L labels   B buildings   G grid",
             "V +10 cars   R Stuttgart origin",
@@ -2375,6 +2592,23 @@ class TrafficVisualizer:
                     f"Drive cycle   {state}",
                     f"Samples       {recorder.sample_count:7d}",
                 ]
+        if self.batch_state in {"waiting_elevation", "running", "done", "error"}:
+            lines += [
+                "",
+                f"Batch state    {self.batch_state}",
+            ]
+
+            for result in self.batch_results[:5]:
+                if result.success:
+                    lines.append(
+                        f"R{result.route_index} fast sim  "
+                        f"{result.realtime_factor:6.1f}x realtime"
+                    )
+                else:
+                    lines.append(
+                        f"R{result.route_index} fast sim  FAILED"
+                    )
+
         if self.vehicle_config_error:
             lines += [
                 "",
@@ -2417,6 +2651,7 @@ class TrafficVisualizer:
 
             self.elevation.poll()
             self.poll_address_planner()
+            self.poll_parallel_candidate_evaluation()
 
             if (
                 self.ego_waiting_for_elevation
@@ -2519,6 +2754,7 @@ class TrafficVisualizer:
 
         self.finish_drive_cycle("application_shutdown")
         self.address_executor.shutdown(wait=False, cancel_futures=True)
+        self.batch_executor.shutdown(wait=False, cancel_futures=True)
         self.elevation.close()
         self.live_traffic.close()
         self.chunks.close()
