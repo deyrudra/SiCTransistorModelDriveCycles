@@ -22,7 +22,23 @@ driver:
 
 inverter:
   dc_bus_voltage_v: 345.5
+  switching_frequency_hz: 10000
+  max_phase_current_a_peak: 700
   parallel_devices_per_switch: 4
+  modulation_factor: 0.90
+
+
+mosfet:
+  rds_on_ohm_at_25c: 0.020
+  rds_on_temperature_exponent: 1.273
+
+  eon_reference_j: 0.000486
+  eoff_reference_j: 0.000506
+  switching_reference_current_a: 50
+  switching_reference_voltage_v: 520
+
+  tj_reference_c: 25.0
+  tj_max_c: 200.0
 
 cooling:
   coolant_inlet_temp_c: 65.0
