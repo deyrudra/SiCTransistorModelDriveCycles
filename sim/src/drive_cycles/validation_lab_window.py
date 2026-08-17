@@ -6,7 +6,7 @@ import math
 import sys
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 # Allow direct execution from sim/src/drive_cycles.
 THIS_DIR = Path(__file__).resolve().parent
@@ -17,6 +17,13 @@ if str(SRC_DIR) not in sys.path:
 from drive_cycles.vehicle_route_validation import (
     validate_vehicle_route,
     save_vehicle_route_validation,
+)
+from drive_cycles.wltc_class3_validation import (
+    UNECE_WLTC_WORKBOOK_URL,
+    download_official_workbook,
+    extract_class3_trace_from_xls,
+    run_wltc_validation,
+    summarize_trace,
 )
 
 
@@ -95,16 +102,19 @@ class ValidationLab(tk.Tk):
         notebook.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
         self.vehicle_tab = ttk.Frame(notebook)
+        self.wltc_tab = ttk.Frame(notebook)
         self.inverter_tab = ttk.Frame(notebook)
         self.thermal_tab = ttk.Frame(notebook)
         self.reliability_tab = ttk.Frame(notebook)
 
         notebook.add(self.vehicle_tab, text="1. Vehicle / Route")
-        notebook.add(self.inverter_tab, text="2. Inverter")
-        notebook.add(self.thermal_tab, text="3. Thermal")
-        notebook.add(self.reliability_tab, text="4. Reliability")
+        notebook.add(self.wltc_tab, text="2. WLTC Class 3")
+        notebook.add(self.inverter_tab, text="3. Inverter")
+        notebook.add(self.thermal_tab, text="4. Thermal")
+        notebook.add(self.reliability_tab, text="5. Reliability")
 
         self._build_vehicle_tab()
+        self._build_wltc_tab()
         self._build_placeholder(
             self.inverter_tab,
             "Inverter validation",
@@ -122,6 +132,443 @@ class ValidationLab(tk.Tk):
             "Reliability validation",
             "Later stage: compare rainflow / damage-model behaviour against "
             "published power-cycling lifetime data.",
+        )
+
+    def _build_wltc_tab(self) -> None:
+        root = ttk.Frame(
+            self.wltc_tab,
+            padding=16,
+        )
+        root.pack(
+            fill="both",
+            expand=True,
+        )
+
+        ttk.Label(
+            root,
+            text="WLTC Class 3 standardized vehicle validation",
+            font=("TkDefaultFont", 13, "bold"),
+        ).pack(anchor="w")
+
+        ttk.Label(
+            root,
+            text=(
+                "The target speed trace is prescribed directly to the "
+                "longitudinal vehicle model on 0 degree grade. Traffic, map "
+                "routing and Stuttgart elevation are intentionally bypassed."
+            ),
+            wraplength=1050,
+        ).pack(
+            anchor="w",
+            pady=(4, 12),
+        )
+
+        source_frame = ttk.LabelFrame(
+            root,
+            text="Official UNECE trace source",
+            padding=10,
+        )
+        source_frame.pack(
+            fill="x",
+        )
+
+        self.wltc_workbook_var = tk.StringVar(
+            value=str(
+                self.export_dir
+                / "wltc"
+                / "WLTP-DHC-12-07e.xls"
+            )
+        )
+
+        self.wltc_trace_var = tk.StringVar(
+            value=str(
+                self.export_dir
+                / "wltc"
+                / "wltc_class3_official.csv"
+            )
+        )
+
+        ttk.Label(
+            source_frame,
+            text="UNECE source:",
+        ).grid(
+            row=0,
+            column=0,
+            sticky="w",
+        )
+
+        ttk.Label(
+            source_frame,
+            text=UNECE_WLTC_WORKBOOK_URL,
+            wraplength=900,
+        ).grid(
+            row=0,
+            column=1,
+            columnspan=4,
+            sticky="w",
+            padx=(8, 0),
+        )
+
+        ttk.Label(
+            source_frame,
+            text="Workbook:",
+        ).grid(
+            row=1,
+            column=0,
+            sticky="w",
+            pady=(8, 0),
+        )
+
+        ttk.Entry(
+            source_frame,
+            textvariable=self.wltc_workbook_var,
+            width=92,
+        ).grid(
+            row=1,
+            column=1,
+            sticky="ew",
+            padx=(8, 6),
+            pady=(8, 0),
+        )
+
+        ttk.Button(
+            source_frame,
+            text="Import .xls...",
+            command=self._browse_wltc_workbook,
+        ).grid(
+            row=1,
+            column=2,
+            padx=4,
+            pady=(8, 0),
+        )
+
+        ttk.Button(
+            source_frame,
+            text="Download official",
+            command=self._download_wltc_workbook,
+        ).grid(
+            row=1,
+            column=3,
+            padx=4,
+            pady=(8, 0),
+        )
+
+        ttk.Button(
+            source_frame,
+            text="Extract trace",
+            command=self._extract_wltc_trace,
+        ).grid(
+            row=1,
+            column=4,
+            padx=(4, 0),
+            pady=(8, 0),
+        )
+
+        ttk.Label(
+            source_frame,
+            text="Trace CSV:",
+        ).grid(
+            row=2,
+            column=0,
+            sticky="w",
+            pady=(8, 0),
+        )
+
+        ttk.Entry(
+            source_frame,
+            textvariable=self.wltc_trace_var,
+            width=92,
+        ).grid(
+            row=2,
+            column=1,
+            sticky="ew",
+            padx=(8, 6),
+            pady=(8, 0),
+        )
+
+        ttk.Button(
+            source_frame,
+            text="Select CSV...",
+            command=self._browse_wltc_trace,
+        ).grid(
+            row=2,
+            column=2,
+            padx=4,
+            pady=(8, 0),
+        )
+
+        ttk.Button(
+            source_frame,
+            text="Run WLTC validation",
+            command=self._run_wltc_validation,
+        ).grid(
+            row=2,
+            column=3,
+            columnspan=2,
+            padx=(4, 0),
+            pady=(8, 0),
+            sticky="ew",
+        )
+
+        source_frame.columnconfigure(
+            1,
+            weight=1,
+        )
+
+        results_frame = ttk.LabelFrame(
+            root,
+            text="WLTC Class 3 result",
+            padding=10,
+        )
+        results_frame.pack(
+            fill="both",
+            expand=True,
+            pady=(12, 0),
+        )
+
+        self.wltc_result_text = tk.Text(
+            results_frame,
+            wrap="word",
+            state="disabled",
+            font=("Consolas", 10),
+        )
+        self.wltc_result_text.pack(
+            fill="both",
+            expand=True,
+        )
+
+        self.wltc_status_var = tk.StringVar(
+            value=(
+                "Prepare the official UNECE trace, then run the "
+                "standardized validation."
+            )
+        )
+
+        ttk.Label(
+            root,
+            textvariable=self.wltc_status_var,
+            anchor="w",
+        ).pack(
+            fill="x",
+            pady=(8, 0),
+        )
+
+    def _browse_wltc_workbook(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Select official UNECE WLTC workbook",
+            filetypes=[
+                ("Excel 97-2003 workbook", "*.xls"),
+                ("All files", "*.*"),
+            ],
+        )
+        if path:
+            self.wltc_workbook_var.set(
+                path
+            )
+
+    def _browse_wltc_trace(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Select WLTC Class 3 trace CSV",
+            filetypes=[
+                ("CSV files", "*.csv"),
+                ("All files", "*.*"),
+            ],
+        )
+        if path:
+            self.wltc_trace_var.set(
+                path
+            )
+
+    def _download_wltc_workbook(self) -> None:
+        destination = Path(
+            self.wltc_workbook_var.get()
+        )
+
+        self.wltc_status_var.set(
+            "Downloading official UNECE workbook..."
+        )
+        self.update_idletasks()
+
+        try:
+            path = download_official_workbook(
+                destination
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "WLTC download failed",
+                (
+                    f"{exc}\n\n"
+                    "You can download the UNECE workbook in your browser "
+                    "and use 'Import .xls...' instead."
+                ),
+            )
+            self.wltc_status_var.set(
+                "Download failed; manual import is available."
+            )
+            return
+
+        self.wltc_workbook_var.set(
+            str(path)
+        )
+        self.wltc_status_var.set(
+            f"Downloaded: {path.name}"
+        )
+
+    def _extract_wltc_trace(self) -> None:
+        workbook = Path(
+            self.wltc_workbook_var.get()
+        )
+        output = Path(
+            self.wltc_trace_var.get()
+        )
+
+        if not workbook.is_file():
+            messagebox.showinfo(
+                "WLTC Class 3",
+                "Select or download the official UNECE .xls workbook first.",
+            )
+            return
+
+        self.wltc_status_var.set(
+            "Extracting and verifying WLTC Class 3 trace..."
+        )
+        self.update_idletasks()
+
+        try:
+            path = extract_class3_trace_from_xls(
+                workbook,
+                output,
+            )
+            summary = summarize_trace(
+                path
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "WLTC extraction failed",
+                str(exc),
+            )
+            self.wltc_status_var.set(
+                "Trace extraction failed."
+            )
+            return
+
+        self.wltc_trace_var.set(
+            str(path)
+        )
+
+        self.wltc_status_var.set(
+            (
+                f"Trace ready: {summary.distance_km:.3f} km, "
+                f"{summary.duration_s:.0f} s, "
+                f"peak {summary.peak_speed_kmh:.1f} km/h"
+            )
+        )
+
+    def _run_wltc_validation(self) -> None:
+        trace_path = Path(
+            self.wltc_trace_var.get()
+        )
+
+        if not trace_path.is_file():
+            messagebox.showinfo(
+                "WLTC Class 3",
+                "Prepare or select the official Class 3 trace CSV first.",
+            )
+            return
+
+        self.wltc_status_var.set(
+            "Running prescribed-speed WLTC Class 3 vehicle model..."
+        )
+        self.update_idletasks()
+
+        try:
+            result = run_wltc_validation(
+                trace_path,
+                self.vehicle_config,
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "WLTC validation failed",
+                str(exc),
+            )
+            self.wltc_status_var.set(
+                "WLTC validation failed."
+            )
+            return
+
+        lines = [
+            "WLTC CLASS 3 STANDARDIZED VEHICLE VALIDATION",
+            "=" * 70,
+            "",
+            "TEST DEFINITION",
+            "  Speed input:      official UNECE Class 3 target trace",
+            "  Road grade:       0.0 deg",
+            "  Traffic:          disabled",
+            "  Route elevation:  disabled",
+            "  Vehicle config:   " + self.vehicle_config.name,
+            "",
+            "TRACE VERIFICATION",
+            f"  Samples:          {result.trace.sample_count}",
+            f"  Duration:         {result.trace.duration_s:.1f} s",
+            f"  Distance:         {result.trace.distance_km:.3f} km",
+            f"  Average speed:    {result.trace.average_speed_kmh:.2f} km/h",
+            f"  Peak speed:       {result.trace.peak_speed_kmh:.2f} km/h",
+            f"  Stopped time:     {result.trace.stopped_time_percent:.2f} %",
+            f"  Speed checksum:   {result.trace.speed_checksum_kmh:.1f}",
+            f"  Trace assessment: {result.trace_assessment}",
+            "",
+            "BATTERY ENERGY",
+            f"  Traction:         {result.traction_energy_kwh:.6f} kWh",
+            f"  Recovered regen:  {result.recovered_energy_kwh:.6f} kWh",
+            f"  Base auxiliary:   {result.base_auxiliary_energy_kwh:.6f} kWh",
+            f"  HVAC:             {result.hvac_energy_kwh:.6f} kWh",
+            f"  Total auxiliary:  {result.total_auxiliary_energy_kwh:.6f} kWh",
+            f"  Net battery:      {result.net_battery_energy_kwh:.6f} kWh",
+            "",
+            "GERMAN WLTP BENCHMARK COMPARISON",
+            f"  Benchmark:        {result.benchmark_name}",
+            f"  Official target:  {result.benchmark_wh_per_km:.2f} Wh/km",
+            f"  Simulation:       {result.simulated_wh_per_km:.2f} Wh/km",
+            f"  Difference:       {result.error_wh_per_km:+.2f} Wh/km",
+            f"  Error:            {result.error_percent:+.2f} %",
+            f"  Assessment:       {result.energy_assessment}",
+            "",
+            "INTERPRETATION",
+            (
+                "  This comparison is far stronger than the Stuttgart-route "
+                "comparison because"
+            ),
+            (
+                "  the simulated vehicle and the benchmark are now evaluated "
+                "against a standardized"
+            ),
+            (
+                "  flat prescribed-speed cycle rather than different route "
+                "topography and traffic."
+            ),
+        ]
+
+        self.wltc_result_text.configure(
+            state="normal"
+        )
+        self.wltc_result_text.delete(
+            "1.0",
+            tk.END,
+        )
+        self.wltc_result_text.insert(
+            "1.0",
+            "\n".join(lines),
+        )
+        self.wltc_result_text.configure(
+            state="disabled"
+        )
+
+        self.wltc_status_var.set(
+            (
+                f"WLTC validation complete: "
+                f"{result.simulated_wh_per_km:.2f} Wh/km "
+                f"({result.error_percent:+.2f} %)"
+            )
         )
 
     @staticmethod
