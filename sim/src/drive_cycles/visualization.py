@@ -821,6 +821,7 @@ class TrafficVisualizer:
         # Separate research/comparison window. It runs in its own process so
         # Tkinter and Pygame event loops never block one another.
         self.mission_lab_process = None
+        self.validation_lab_process = None
         self.address_searcher = default_stuttgart_searcher(PROJECT_ROOT)
         self.address_executor = ThreadPoolExecutor(
             max_workers=1,
@@ -928,6 +929,8 @@ class TrafficVisualizer:
                     self.begin_parallel_candidate_evaluation()
                 elif event.key == pygame.K_F6:
                     self.launch_mission_profile_lab()
+                elif event.key == pygame.K_F7:
+                    self.launch_validation_lab()
                 elif (
                     pygame.K_1 <= event.key <= pygame.K_5
                     and self.candidate_routes
@@ -1181,6 +1184,59 @@ class TrafficVisualizer:
                     f"  Route {result.route_index}: FAILED - "
                     f"{result.error}"
                 )
+
+    def launch_validation_lab(self) -> None:
+        if (
+            self.validation_lab_process is not None
+            and self.validation_lab_process.poll() is None
+        ):
+            self.route_status = "Validation Lab is already open"
+            return
+
+        window_module = (
+            PROJECT_ROOT
+            / "src"
+            / "drive_cycles"
+            / "validation_lab_window.py"
+        )
+
+        if not window_module.is_file():
+            self.route_status = (
+                "Validation Lab missing: "
+                f"{window_module.name}"
+            )
+            return
+
+        DEFAULT_RESEARCH_EXPORT_DIR.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        command = [
+            sys.executable,
+            str(window_module),
+            "--cycles-dir",
+            str(DEFAULT_DRIVE_CYCLE_DIR),
+            "--vehicle-config",
+            str(DEFAULT_CAR_CONFIG),
+            "--export-dir",
+            str(DEFAULT_RESEARCH_EXPORT_DIR),
+        ]
+
+        try:
+            self.validation_lab_process = subprocess.Popen(
+                command,
+                cwd=str(PROJECT_ROOT),
+            )
+            self.route_status = (
+                "Validation Lab opened - Vehicle/Route tab ready"
+            )
+        except Exception as exc:
+            self.validation_lab_process = None
+            self.route_status = (
+                f"Validation Lab launch failed: {exc}"
+            )
+
 
     def launch_mission_profile_lab(self) -> None:
         if (
@@ -2461,6 +2517,7 @@ class TrafficVisualizer:
             "Address GUI top-right   F2 toggle panel",
             "F5 evaluate ALL candidate routes in parallel",
             "F6 Mission Profile Lab / research export",
+            "F7 Validation Lab / model calibration",
             "Left click A/B   right click clear route",
             "L labels   B buildings   G grid",
             "V +10 cars   R Stuttgart origin",

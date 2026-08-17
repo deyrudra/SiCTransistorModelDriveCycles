@@ -1,6 +1,19 @@
+# Tesla Model 3 Premium Long Range Rear-Wheel Drive
+# Vehicle-layer validation target: Tesla Germany WLTP combined
+#
+# Official trim-level values used here:
+#   mass_kg: 1822
+#   rear motor power: 235 kW
+#   official WLTP combined consumption: 13.6 kWh/100 km = 136 Wh/km
+#
+# IMPORTANT:
+# Cd, frontal area, rolling resistance, drivetrain efficiencies,
+# inverter/device parameters, thermal parameters, and reliability parameters
+# below are still modelling assumptions unless explicitly calibrated later.
+
 vehicle:
   name: tesla_model3_lr_rwd
-  mass_kg: 1847
+  mass_kg: 1822
   frontal_area_m2: 2.22
   drag_coefficient: 0.23
   rolling_resistance_coefficient: 0.010
@@ -8,10 +21,13 @@ vehicle:
 powertrain:
   drivetrain_efficiency: 0.92
   regenerative_efficiency: 0.80
-  max_propulsion_power_w: 239000
+
+  # Tesla Germany lists 235 kW rear power for this trim.
+  max_propulsion_power_w: 235000
+
   max_regen_power_w: 90000
 
-  # Used by the ego vehicle during the Stuttgart traffic simulation.
+  # These are simulation/driver limits, not Tesla certification figures.
   max_acceleration_mps2: 1.8
   comfortable_braking_mps2: 2.5
   emergency_braking_mps2: 6.0
@@ -20,6 +36,16 @@ driver:
   safe_distance_m: 5.0
   time_headway_s: 1.5
 
+validation:
+  benchmark_name: Tesla Model 3 Premium Long Range Rear-Wheel Drive
+  market: Germany
+  certification_cycle: WLTP_combined
+  official_consumption_kwh_per_100km: 13.6
+  official_consumption_wh_per_km: 136.0
+  official_mass_kg: 1822
+  official_rear_motor_power_kw: 235
+  benchmark_purpose: vehicle_layer_validation
+
 inverter:
   dc_bus_voltage_v: 345.5
   switching_frequency_hz: 10000
@@ -27,31 +53,36 @@ inverter:
   parallel_devices_per_switch: 4
   modulation_factor: 0.90
 
-
 mosfet:
+  # Electrical values are still illustrative until a specific SiC device is selected.
   rds_on_ohm_at_25c: 0.020
   rds_on_temperature_exponent: 1.273
-
   eon_reference_j: 0.000486
   eoff_reference_j: 0.000506
   switching_reference_current_a: 50
   switching_reference_voltage_v: 520
-
   tj_reference_c: 25.0
   tj_max_c: 200.0
 
   thermal:
+    # Foster-network sum = 0.42 C/W.
+    # Still illustrative until fitted to a selected device's Zth(j-c) curve.
     rth_jc_c_per_w: 0.42
     rth_case_to_coolant_c_per_w: 0.05
+
     foster_rc_pairs:
       - rth_c_per_w: 0.0216
         tau_s: 0.000077
+
       - rth_c_per_w: 0.0703
         tau_s: 0.001554
+
       - rth_c_per_w: 0.1668
         tau_s: 0.016634
+
       - rth_c_per_w: 0.1613
         tau_s: 0.142761
+
     max_iterations: 30
     convergence_tolerance_c: 0.01
     relaxation: 0.5
@@ -61,12 +92,11 @@ cooling:
 
 reliability:
   model: coffin_manson_arrhenius
+
+  # Do not use this section for absolute lifetime prediction yet.
   calibrated: false
   calibration_source: null
 
-  # Relative-damage normalization parameters.
-  # These are placeholders until calibrated against device-specific
-  # SiC power-cycling measurements.
   delta_t_reference_c: 40.0
   mean_tj_reference_c: 100.0
   coffin_manson_exponent: 5.0
