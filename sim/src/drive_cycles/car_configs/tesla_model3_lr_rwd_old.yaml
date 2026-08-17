@@ -12,7 +12,7 @@
 # below are still modelling assumptions unless explicitly calibrated later.
 
 vehicle:
-  name: tesla_model3_premium_long_range_rwd_de_wltp
+  name: tesla_model3_lr_rwd
   mass_kg: 1822
   frontal_area_m2: 2.22
   drag_coefficient: 0.23
@@ -26,13 +26,6 @@ powertrain:
   max_propulsion_power_w: 235000
 
   max_regen_power_w: 90000
-
-  # Regen blending assumptions for model validation.
-  # These are NOT Tesla-published calibration values yet.
-  # Regen is zero at/below 1.5 m/s (~5.4 km/h), then fades linearly
-  # to full configured regen availability at 5.0 m/s (~18 km/h).
-  regen_cutoff_speed_mps: 1.5
-  regen_full_speed_mps: 5.0
 
   # These are simulation/driver limits, not Tesla certification figures.
   max_acceleration_mps2: 1.8

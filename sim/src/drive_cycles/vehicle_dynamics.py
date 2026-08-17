@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import math
 
 from drive_cycles.vehicle_config import VehicleDynamicsConfig
+from drive_cycles.regen_model import split_regen_and_friction
 
 
 G_MPS2 = 9.80665
@@ -120,26 +121,23 @@ class LongitudinalVehicleModel:
                 propulsion_limited = True
 
         else:
-            if self.config.regenerative_efficiency > 0.0:
-                max_regen_wheel_power = (
-                    self.config.max_regen_power_w
-                    / self.config.regenerative_efficiency
-                )
-            else:
-                max_regen_wheel_power = 0.0
-
-            max_regen_force = (
-                max_regen_wheel_power
-                / effective_speed
+            braking_wheel_power = abs(
+                requested_wheel_force * v
             )
 
-            brake_force = abs(actual_wheel_force)
+            split = split_regen_and_friction(
+                speed_mps=v,
+                braking_wheel_power_w=braking_wheel_power,
+                regenerative_efficiency=self.config.regenerative_efficiency,
+                max_regen_dc_power_w=self.config.max_regen_power_w,
+                cutoff_speed_mps=self.config.regen_cutoff_speed_mps,
+                full_regen_speed_mps=self.config.regen_full_speed_mps,
+            )
 
-            if brake_force > max_regen_force:
-                regen_limited = True
-                friction_brake_power = (
-                    brake_force - max_regen_force
-                ) * v
+            friction_brake_power = split.friction_brake_power_w
+            regen_limited = (
+                friction_brake_power > 1e-9
+            )
 
         actual_acceleration = (
             actual_wheel_force - resistance
@@ -162,14 +160,17 @@ class LongitudinalVehicleModel:
                 / max(self.config.drivetrain_efficiency, 1e-9)
             )
         else:
-            dc_power = (
-                actual_wheel_power
-                * self.config.regenerative_efficiency
+            split = split_regen_and_friction(
+                speed_mps=v,
+                braking_wheel_power_w=abs(actual_wheel_power),
+                regenerative_efficiency=self.config.regenerative_efficiency,
+                max_regen_dc_power_w=self.config.max_regen_power_w,
+                cutoff_speed_mps=self.config.regen_cutoff_speed_mps,
+                full_regen_speed_mps=self.config.regen_full_speed_mps,
             )
-            dc_power = max(
-                dc_power,
-                -self.config.max_regen_power_w,
-            )
+            dc_power = -split.recovered_dc_power_w
+            friction_brake_power = split.friction_brake_power_w
+            regen_limited = friction_brake_power > 1e-9
 
         return LongitudinalForces(
             requested_acceleration_mps2=requested_a,

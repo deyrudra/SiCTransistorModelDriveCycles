@@ -18,6 +18,8 @@ class VehicleDynamicsConfig:
     regenerative_efficiency: float
     max_propulsion_power_w: float
     max_regen_power_w: float
+    regen_cutoff_speed_mps: float
+    regen_full_speed_mps: float
     max_acceleration_mps2: float
     comfortable_braking_mps2: float
     emergency_braking_mps2: float
@@ -76,7 +78,7 @@ def load_vehicle_config(path: str | Path) -> VehicleDynamicsConfig:
 
     name = str(vehicle.get("name", config_path.stem)).strip() or config_path.stem
 
-    return VehicleDynamicsConfig(
+    config = VehicleDynamicsConfig(
         name=name,
         mass_kg=_number(vehicle, "mass_kg", 1800.0, minimum=100.0),
         frontal_area_m2=_number(vehicle, "frontal_area_m2", 2.2, minimum=0.1),
@@ -96,6 +98,18 @@ def load_vehicle_config(path: str | Path) -> VehicleDynamicsConfig:
         max_regen_power_w=_number(
             powertrain, "max_regen_power_w", 80000.0, minimum=0.0
         ),
+        regen_cutoff_speed_mps=_number(
+            powertrain,
+            "regen_cutoff_speed_mps",
+            1.5,
+            minimum=0.0,
+        ),
+        regen_full_speed_mps=_number(
+            powertrain,
+            "regen_full_speed_mps",
+            5.0,
+            minimum=0.01,
+        ),
         max_acceleration_mps2=_number(
             powertrain, "max_acceleration_mps2", 1.8, minimum=0.1
         ),
@@ -108,3 +122,10 @@ def load_vehicle_config(path: str | Path) -> VehicleDynamicsConfig:
         safe_distance_m=_number(driver, "safe_distance_m", 5.0, minimum=0.0),
         time_headway_s=_number(driver, "time_headway_s", 1.5, minimum=0.1),
     )
+
+    if config.regen_full_speed_mps <= config.regen_cutoff_speed_mps:
+        raise ValueError(
+            "regen_full_speed_mps must be greater than regen_cutoff_speed_mps."
+        )
+
+    return config

@@ -296,13 +296,23 @@ class ValidationLab(tk.Tk):
 
         lower = ttk.Panedwindow(
             right,
+            orient="vertical",
+        )
+        lower.pack(fill="both", expand=False, pady=(8, 0))
+
+        diagnostic_row = ttk.Panedwindow(
+            lower,
             orient="horizontal",
         )
-        lower.pack(fill="x", pady=(8, 0))
 
         breakdown_frame = ttk.LabelFrame(
-            lower,
+            diagnostic_row,
             text="Energy breakdown",
+            padding=6,
+        )
+        elevation_frame = ttk.LabelFrame(
+            diagnostic_row,
+            text="Elevation / grade validation",
             padding=6,
         )
         detail_frame = ttk.LabelFrame(
@@ -311,8 +321,11 @@ class ValidationLab(tk.Tk):
             padding=6,
         )
 
-        lower.add(breakdown_frame, weight=2)
-        lower.add(detail_frame, weight=3)
+        diagnostic_row.add(breakdown_frame, weight=1)
+        diagnostic_row.add(elevation_frame, weight=1)
+
+        lower.add(diagnostic_row, weight=2)
+        lower.add(detail_frame, weight=2)
 
         self.breakdown = ttk.Treeview(
             breakdown_frame,
@@ -328,11 +341,44 @@ class ValidationLab(tk.Tk):
         self.breakdown.column("whkm", width=90, anchor="e")
         self.breakdown.pack(fill="both", expand=True)
 
+        self.regen_efficiency_var = tk.StringVar(
+            value="Regen capture efficiency: -"
+        )
+        ttk.Label(
+            breakdown_frame,
+            textvariable=self.regen_efficiency_var,
+            font=("TkDefaultFont", 9, "bold"),
+        ).pack(anchor="w", pady=(5, 0))
+
         ttk.Label(
             breakdown_frame,
             text=(
-                "Inertial and grade terms are signed. "
-                "Recovered regen is shown as a negative battery contribution."
+                "Capture efficiency = recovered DC energy / available wheel braking energy. "
+                "Inertial and grade terms are signed."
+            ),
+            foreground="#666666",
+            wraplength=430,
+        ).pack(anchor="w", pady=(5, 0))
+
+        self.elevation = ttk.Treeview(
+            elevation_frame,
+            columns=("metric", "value"),
+            show="headings",
+            height=11,
+        )
+        self.elevation.heading("metric", text="Elevation / grade metric")
+        self.elevation.heading("value", text="Value")
+        self.elevation.column("metric", width=260, anchor="w")
+        self.elevation.column("value", width=145, anchor="e")
+        self.elevation.pack(fill="both", expand=True)
+
+        ttk.Label(
+            elevation_frame,
+            text=(
+                "DEM endpoint difference should broadly agree with the "
+                "grade-integrated net elevation change. Grade-guard hits "
+                "show where the smoothed profile still reaches the configured "
+                "physical road-grade limit."
             ),
             foreground="#666666",
             wraplength=430,
@@ -487,6 +533,11 @@ class ValidationLab(tk.Tk):
         self._show_selected_result()
 
     def _populate_breakdown(self, result) -> None:
+        self.regen_efficiency_var.set(
+            f"Regen capture efficiency: "
+            f"{result.regen_capture_efficiency_percent:.2f} %"
+        )
+
         for item in self.breakdown.get_children():
             self.breakdown.delete(item)
 
@@ -508,11 +559,23 @@ class ValidationLab(tk.Tk):
                 result.drivetrain_loss_energy_kwh,
             ),
             (
-                "Recovered regen energy",
+                "Positive wheel traction energy",
+                result.positive_wheel_traction_energy_kwh,
+            ),
+            (
+                "Available braking energy",
+                result.negative_wheel_energy_kwh,
+            ),
+            (
+                "Energy recovered by regen",
                 -result.recovered_regen_energy_breakdown_kwh,
             ),
             (
-                "Auxiliary energy",
+                "Energy lost to friction braking",
+                result.friction_brake_energy_breakdown_kwh,
+            ),
+            (
+                "Auxiliary / base electrical energy",
                 result.auxiliary_energy_kwh,
             ),
             (
@@ -538,6 +601,101 @@ class ValidationLab(tk.Tk):
                 ),
             )
 
+    @staticmethod
+    def _optional_m(value) -> str:
+        return "N/A" if value is None else f"{value:+.1f} m"
+
+    def _populate_elevation(self, result) -> None:
+        for item in self.elevation.get_children():
+            self.elevation.delete(item)
+
+        rows = [
+            (
+                "Start elevation (local DEM)",
+                (
+                    "N/A"
+                    if result.start_elevation_m is None
+                    else f"{result.start_elevation_m:.1f} m"
+                ),
+            ),
+            (
+                "End elevation (local DEM)",
+                (
+                    "N/A"
+                    if result.end_elevation_m is None
+                    else f"{result.end_elevation_m:.1f} m"
+                ),
+            ),
+            (
+                "Endpoint DEM difference",
+                self._optional_m(result.endpoint_dem_delta_m),
+            ),
+            (
+                "Grade-integrated net change",
+                f"{result.grade_integrated_net_elevation_change_m:+.1f} m",
+            ),
+            (
+                "Total ascent",
+                f"{result.total_ascent_m:.1f} m",
+            ),
+            (
+                "Total descent",
+                f"{result.total_descent_m:.1f} m",
+            ),
+            (
+                "Maximum uphill grade",
+                f"{result.max_uphill_grade_deg:+.3f} deg",
+            ),
+            (
+                "Maximum downhill grade",
+                f"{result.max_downhill_grade_deg:+.3f} deg",
+            ),
+            (
+                "Mean absolute grade",
+                f"{result.mean_abs_grade_deg:.3f} deg",
+            ),
+            (
+                "Distance-weighted |grade|",
+                f"{result.distance_weighted_mean_abs_grade_deg:.3f} deg",
+            ),
+            (
+                "Physical grade guard",
+                f"+/-{result.grade_guard_deg:.1f} deg",
+            ),
+            (
+                "Samples at grade guard",
+                (
+                    f"{result.grade_clamp_sample_count} "
+                    f"({result.grade_clamp_sample_percent:.3f} %)"
+                ),
+            ),
+            (
+                "Grade-guard status",
+                result.grade_guard_status,
+            ),
+            (
+                "Elevation smoothing radius",
+                f"{result.elevation_smoothing_radius_m:.1f} m",
+            ),
+            (
+                "Grade calculation baseline",
+                f"{result.elevation_grade_baseline_m:.1f} m",
+            ),
+            (
+                "Profile vs endpoint delta error",
+                self._optional_m(
+                    result.elevation_profile_consistency_error_m
+                ),
+            ),
+        ]
+
+        for metric, value in rows:
+            self.elevation.insert(
+                "",
+                "end",
+                values=(metric, value),
+            )
+
     def _show_selected_result(self, _event=None) -> None:
         selected = self.results.selection()
         if not selected:
@@ -548,6 +706,7 @@ class ValidationLab(tk.Tk):
             return
 
         self._populate_breakdown(result)
+        self._populate_elevation(result)
 
         ledger_difference_kwh = (
             result.net_battery_energy_breakdown_kwh
@@ -577,11 +736,46 @@ class ValidationLab(tk.Tk):
             f"  Inertial:              {result.inertial_energy_kwh:+.6f} kWh",
             f"  Grade:                 {result.grade_energy_kwh:+.6f} kWh",
             f"  Drivetrain losses:     {result.drivetrain_loss_energy_kwh:+.6f} kWh",
+            f"  Available braking:     {result.negative_wheel_energy_kwh:+.6f} kWh",
             f"  Recovered regen:       {-result.recovered_regen_energy_breakdown_kwh:+.6f} kWh",
-            f"  Auxiliary:             {result.auxiliary_energy_kwh:+.6f} kWh",
+            f"  Friction braking:      {result.friction_brake_energy_breakdown_kwh:+.6f} kWh",
+            f"  Regen capture eff.:    {result.regen_capture_efficiency_percent:.2f} %",
+            f"  Auxiliary/base:        {result.auxiliary_energy_kwh:+.6f} kWh",
             f"  Net battery estimate:  {result.net_battery_energy_breakdown_kwh:+.6f} kWh",
             f"  Ledger consumption:    {result.breakdown_wh_per_km:.2f} Wh/km",
             f"  Ledger - model net DC: {ledger_difference_kwh:+.6f} kWh",
+            "",
+            "ELEVATION / GRADE",
+            (
+                "  Start elevation:       N/A"
+                if result.start_elevation_m is None
+                else f"  Start elevation:       {result.start_elevation_m:.1f} m"
+            ),
+            (
+                "  End elevation:         N/A"
+                if result.end_elevation_m is None
+                else f"  End elevation:         {result.end_elevation_m:.1f} m"
+            ),
+            (
+                "  Endpoint DEM delta:    N/A"
+                if result.endpoint_dem_delta_m is None
+                else f"  Endpoint DEM delta:    {result.endpoint_dem_delta_m:+.1f} m"
+            ),
+            f"  Integrated net change: {result.grade_integrated_net_elevation_change_m:+.1f} m",
+            f"  Total ascent:          {result.total_ascent_m:.1f} m",
+            f"  Total descent:         {result.total_descent_m:.1f} m",
+            f"  Max uphill grade:      {result.max_uphill_grade_deg:+.3f} deg",
+            f"  Max downhill grade:    {result.max_downhill_grade_deg:+.3f} deg",
+            f"  Mean absolute grade:   {result.mean_abs_grade_deg:.3f} deg",
+            f"  Physical grade guard:  +/-{result.grade_guard_deg:.1f} deg",
+            (
+                f"  Grade-guard hits:      "
+                f"{result.grade_clamp_sample_count} "
+                f"({result.grade_clamp_sample_percent:.3f} %)"
+            ),
+            f"  Guard status:           {result.grade_guard_status}",
+            f"  Smoothing radius:       {result.elevation_smoothing_radius_m:.1f} m",
+            f"  Grade baseline:         {result.elevation_grade_baseline_m:.1f} m",
             "",
             "SPEED / ROUTE BEHAVIOUR",
             f"  Distance:              {result.distance_km:.3f} km",

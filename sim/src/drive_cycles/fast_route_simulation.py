@@ -803,15 +803,52 @@ def run_fast_route_scenario(
             else "max_simulation_time"
         )
 
+        # Persist route endpoint provenance in F5/headless recordings too.
+        # Interactive recordings already include this metadata; without it the
+        # F7 Validation Lab cannot query the local DEM for endpoint elevations.
+        endpoint_metadata = {}
+
+        if scenario.route_node_ids:
+            start_node_id = scenario.route_node_ids[0]
+            end_node_id = scenario.route_node_ids[-1]
+
+            endpoint_metadata["start_node_id"] = start_node_id
+            endpoint_metadata["end_node_id"] = end_node_id
+
+            for prefix, node_id in (
+                ("start", start_node_id),
+                ("end", end_node_id),
+            ):
+                node = network.nodes.get(node_id)
+
+                if node is None:
+                    continue
+
+                if hasattr(node, "lat"):
+                    endpoint_metadata[f"{prefix}_lat"] = float(node.lat)
+
+                for longitude_name in ("lon", "lng", "longitude"):
+                    if hasattr(node, longitude_name):
+                        endpoint_metadata[f"{prefix}_lon"] = float(
+                            getattr(node, longitude_name)
+                        )
+                        break
+
+                endpoint_metadata[f"{prefix}_location"] = (
+                    f"OSM node {node_id}"
+                )
+
         path = recorder.save(
             status=status,
             extra_metadata={
                 "execution_mode": "headless_fixed_step",
                 "fixed_dt_s": scenario.fixed_dt_s,
                 "route_index": scenario.route_index,
+                "route_candidate_index": scenario.route_index,
                 "traffic_speed_factor": scenario.traffic_speed_factor,
                 "vehicle_config": vehicle_config.name,
                 "random_seed": scenario.random_seed,
+                **endpoint_metadata,
             },
         )
 

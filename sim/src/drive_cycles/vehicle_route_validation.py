@@ -1,5 +1,4 @@
 from __future__ import annotations
-import sys
 
 """
 Vehicle / route layer validation.
@@ -31,12 +30,9 @@ from statistics import mean
 
 import yaml
 
-SRC = Path(__file__).resolve().parents[2] / "src"
-if SRC.exists():
-    sys.path.append(str(SRC))
-
-
 from drive_cycles.route_summary import analyze_route_summary
+from drive_cycles.regen_model import split_regen_and_friction
+from drive_cycles.local_dem import LocalHgtDem
 
 
 # WLTC Class 3 aggregate reference characteristics.
@@ -86,9 +82,29 @@ class VehicleRouteValidation:
     negative_wheel_energy_kwh: float
     drivetrain_loss_energy_kwh: float
     recovered_regen_energy_breakdown_kwh: float
+    friction_brake_energy_breakdown_kwh: float
+    regen_capture_efficiency_percent: float
     auxiliary_energy_kwh: float
     net_battery_energy_breakdown_kwh: float
     breakdown_wh_per_km: float
+
+    start_elevation_m: float | None
+    end_elevation_m: float | None
+    endpoint_dem_delta_m: float | None
+    grade_integrated_net_elevation_change_m: float
+    total_ascent_m: float
+    total_descent_m: float
+    max_uphill_grade_deg: float
+    max_downhill_grade_deg: float
+    mean_abs_grade_deg: float
+    distance_weighted_mean_abs_grade_deg: float
+    grade_clamp_sample_count: int
+    grade_clamp_sample_percent: float
+    grade_guard_deg: float
+    elevation_smoothing_radius_m: float
+    elevation_grade_baseline_m: float
+    grade_guard_status: str
+    elevation_profile_consistency_error_m: float | None
 
     wltc_average_speed_delta_kmh: float
     wltc_peak_speed_delta_kmh: float
@@ -315,6 +331,12 @@ def _vehicle_energy_parameters(vehicle_config_path):
         "max_regen_power_w": pick(
             powertrain, ("max_regen_power_w",), float("inf")
         ),
+        "regen_cutoff_speed_mps": pick(
+            powertrain, ("regen_cutoff_speed_mps",), 1.5
+        ),
+        "regen_full_speed_mps": pick(
+            powertrain, ("regen_full_speed_mps",), 5.0
+        ),
         "auxiliary_power_w": aux_w,
     }
 
@@ -336,7 +358,7 @@ def _calculate_energy_breakdown(times, speeds, grades_deg, params):
 
     aero_j = roll_j = inertial_j = grade_j = 0.0
     positive_wheel_j = negative_wheel_j = 0.0
-    battery_traction_j = regen_j = auxiliary_j = 0.0
+    battery_traction_j = regen_j = friction_j = auxiliary_j = 0.0
 
     for i in range(1, len(times)):
         dt = times[i] - times[i - 1]
@@ -367,7 +389,18 @@ def _calculate_energy_breakdown(times, speeds, grades_deg, params):
         else:
             braking_w = -p_wheel
             negative_wheel_j += braking_w * dt
-            regen_j += min(braking_w, max_regen_w) * eta_regen * dt
+
+            split = split_regen_and_friction(
+                speed_mps=v,
+                braking_wheel_power_w=braking_w,
+                regenerative_efficiency=eta_regen,
+                max_regen_dc_power_w=max_regen_w,
+                cutoff_speed_mps=params["regen_cutoff_speed_mps"],
+                full_regen_speed_mps=params["regen_full_speed_mps"],
+            )
+
+            regen_j += split.recovered_dc_power_w * dt
+            friction_j += split.friction_brake_power_w * dt
 
         auxiliary_j += aux_w * dt
 
@@ -384,8 +417,213 @@ def _calculate_energy_breakdown(times, speeds, grades_deg, params):
         "negative_wheel_energy_kwh": negative_wheel_j * kwh,
         "drivetrain_loss_energy_kwh": drivetrain_loss_j * kwh,
         "recovered_regen_energy_breakdown_kwh": regen_j * kwh,
+        "friction_brake_energy_breakdown_kwh": friction_j * kwh,
+        "regen_capture_efficiency_percent": (
+            100.0 * regen_j / negative_wheel_j
+            if negative_wheel_j > 0.0
+            else 0.0
+        ),
         "auxiliary_energy_kwh": auxiliary_j * kwh,
         "net_battery_energy_breakdown_kwh": net_battery_j * kwh,
+    }
+
+
+
+GRADE_CLAMP_DEG = 15.0
+GRADE_CLAMP_TOLERANCE_DEG = 1e-3
+ELEVATION_SMOOTHING_RADIUS_M = 25.0
+ELEVATION_GRADE_BASELINE_M = 25.0
+
+
+def _read_cycle_metadata(path: str | Path) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+
+    with Path(path).open("r", encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.strip()
+
+            if not stripped.startswith("#"):
+                break
+
+            text = stripped[1:].strip()
+            if "=" not in text:
+                continue
+
+            key, value = text.split("=", 1)
+            metadata[key.strip()] = value.strip()
+
+    return metadata
+
+
+def _metadata_float(
+    metadata: dict[str, str],
+    *keys: str,
+) -> float | None:
+    for key in keys:
+        value = metadata.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _endpoint_dem_elevations(
+    cycle_path: str | Path,
+    vehicle_config_path: str | Path,
+) -> tuple[float | None, float | None]:
+    metadata = _read_cycle_metadata(cycle_path)
+
+    start_lat = _metadata_float(
+        metadata,
+        "start_lat",
+        "route_start_lat",
+    )
+    start_lon = _metadata_float(
+        metadata,
+        "start_lon",
+        "start_lng",
+        "route_start_lon",
+        "route_start_lng",
+    )
+    end_lat = _metadata_float(
+        metadata,
+        "end_lat",
+        "route_end_lat",
+    )
+    end_lon = _metadata_float(
+        metadata,
+        "end_lon",
+        "end_lng",
+        "route_end_lon",
+        "route_end_lng",
+    )
+
+    if (
+        start_lat is None
+        or start_lon is None
+        or end_lat is None
+        or end_lon is None
+    ):
+        return None, None
+
+    config_path = Path(vehicle_config_path).resolve()
+
+    # Expected:
+    # sim/src/drive_cycles/car_configs/tesla_model3_lr_rwd.yaml
+    # -> sim/cache/elevation/dem
+    try:
+        sim_root = config_path.parents[3]
+    except IndexError:
+        return None, None
+
+    dem_dir = sim_root / "cache" / "elevation" / "dem"
+
+    if not dem_dir.is_dir():
+        return None, None
+
+    dem = LocalHgtDem(dem_dir)
+
+    try:
+        start_elevation = dem.elevation_m(start_lat, start_lon)
+        end_elevation = dem.elevation_m(end_lat, end_lon)
+    except (FileNotFoundError, ValueError):
+        return None, None
+    finally:
+        dem.close()
+
+    return (
+        float(start_elevation) if start_elevation is not None else None,
+        float(end_elevation) if end_elevation is not None else None,
+    )
+
+
+def _elevation_grade_statistics(
+    times: list[float],
+    speeds: list[float],
+    grades_deg: list[float],
+) -> dict:
+    if not grades_deg:
+        return {
+            "grade_integrated_net_elevation_change_m": 0.0,
+            "total_ascent_m": 0.0,
+            "total_descent_m": 0.0,
+            "max_uphill_grade_deg": 0.0,
+            "max_downhill_grade_deg": 0.0,
+            "mean_abs_grade_deg": 0.0,
+            "distance_weighted_mean_abs_grade_deg": 0.0,
+            "grade_clamp_sample_count": 0,
+            "grade_clamp_sample_percent": 0.0,
+        }
+
+    ascent_m = 0.0
+    descent_m = 0.0
+    net_delta_m = 0.0
+    weighted_abs_grade_sum = 0.0
+    distance_sum_m = 0.0
+
+    for i in range(1, len(times)):
+        dt = times[i] - times[i - 1]
+        if dt <= 0.0:
+            continue
+
+        v0 = max(0.0, speeds[i - 1])
+        v1 = max(0.0, speeds[i])
+        ds = 0.5 * (v0 + v1) * dt
+
+        grade_deg = 0.5 * (grades_deg[i - 1] + grades_deg[i])
+        dh = ds * math.tan(math.radians(grade_deg))
+
+        net_delta_m += dh
+        if dh >= 0.0:
+            ascent_m += dh
+        else:
+            descent_m += -dh
+
+        weighted_abs_grade_sum += abs(grade_deg) * ds
+        distance_sum_m += ds
+
+    clamp_count = sum(
+        1
+        for grade in grades_deg
+        if abs(grade) >= (
+            GRADE_CLAMP_DEG
+            - GRADE_CLAMP_TOLERANCE_DEG
+        )
+    )
+
+    clamp_percent = (
+        100.0 * clamp_count / len(grades_deg)
+        if grades_deg
+        else 0.0
+    )
+
+    if clamp_count == 0:
+        guard_status = "CLEAR"
+    elif clamp_percent <= 0.10:
+        guard_status = "MINOR_CONTACT"
+    elif clamp_percent <= 1.00:
+        guard_status = "REVIEW"
+    else:
+        guard_status = "SIGNIFICANT_CLIPPING"
+
+    return {
+        "grade_integrated_net_elevation_change_m": net_delta_m,
+        "total_ascent_m": ascent_m,
+        "total_descent_m": descent_m,
+        "max_uphill_grade_deg": max(grades_deg),
+        "max_downhill_grade_deg": min(grades_deg),
+        "mean_abs_grade_deg": mean(abs(value) for value in grades_deg),
+        "distance_weighted_mean_abs_grade_deg": (
+            weighted_abs_grade_sum / distance_sum_m
+            if distance_sum_m > 0.0
+            else 0.0
+        ),
+        "grade_clamp_sample_count": clamp_count,
+        "grade_clamp_sample_percent": clamp_percent,
+        "grade_guard_status": guard_status,
     }
 
 
@@ -424,6 +662,30 @@ def validate_vehicle_route(
 
     times, speeds, grades = _load_cycle_samples(
         cycle_path
+    )
+
+    elevation_stats = _elevation_grade_statistics(
+        times,
+        speeds,
+        grades,
+    )
+
+    start_elevation_m, end_elevation_m = _endpoint_dem_elevations(
+        cycle_path,
+        vehicle_config_path,
+    )
+
+    endpoint_dem_delta_m = (
+        end_elevation_m - start_elevation_m
+        if start_elevation_m is not None and end_elevation_m is not None
+        else None
+    )
+
+    elevation_profile_consistency_error_m = (
+        elevation_stats["grade_integrated_net_elevation_change_m"]
+        - endpoint_dem_delta_m
+        if endpoint_dem_delta_m is not None
+        else None
     )
 
     energy_params = _vehicle_energy_parameters(
@@ -609,6 +871,12 @@ def validate_vehicle_route(
         recovered_regen_energy_breakdown_kwh=breakdown[
             "recovered_regen_energy_breakdown_kwh"
         ],
+        friction_brake_energy_breakdown_kwh=breakdown[
+            "friction_brake_energy_breakdown_kwh"
+        ],
+        regen_capture_efficiency_percent=breakdown[
+            "regen_capture_efficiency_percent"
+        ],
         auxiliary_energy_kwh=breakdown["auxiliary_energy_kwh"],
         net_battery_energy_breakdown_kwh=breakdown[
             "net_battery_energy_breakdown_kwh"
@@ -616,6 +884,35 @@ def validate_vehicle_route(
         breakdown_wh_per_km=(
             breakdown["net_battery_energy_breakdown_kwh"] * 1000.0 / distance_km
             if distance_km > 0.0 else math.nan
+        ),
+        start_elevation_m=start_elevation_m,
+        end_elevation_m=end_elevation_m,
+        endpoint_dem_delta_m=endpoint_dem_delta_m,
+        grade_integrated_net_elevation_change_m=elevation_stats[
+            "grade_integrated_net_elevation_change_m"
+        ],
+        total_ascent_m=elevation_stats["total_ascent_m"],
+        total_descent_m=elevation_stats["total_descent_m"],
+        max_uphill_grade_deg=elevation_stats["max_uphill_grade_deg"],
+        max_downhill_grade_deg=elevation_stats["max_downhill_grade_deg"],
+        mean_abs_grade_deg=elevation_stats["mean_abs_grade_deg"],
+        distance_weighted_mean_abs_grade_deg=elevation_stats[
+            "distance_weighted_mean_abs_grade_deg"
+        ],
+        grade_clamp_sample_count=elevation_stats[
+            "grade_clamp_sample_count"
+        ],
+        grade_clamp_sample_percent=elevation_stats[
+            "grade_clamp_sample_percent"
+        ],
+        grade_guard_deg=GRADE_CLAMP_DEG,
+        elevation_smoothing_radius_m=ELEVATION_SMOOTHING_RADIUS_M,
+        elevation_grade_baseline_m=ELEVATION_GRADE_BASELINE_M,
+        grade_guard_status=elevation_stats[
+            "grade_guard_status"
+        ],
+        elevation_profile_consistency_error_m=(
+            elevation_profile_consistency_error_m
         ),
         wltc_average_speed_delta_kmh=(
             average_speed_kmh

@@ -32,6 +32,7 @@ from drive_cycles.vehicle_config import (
     VehicleDynamicsConfig,
     load_vehicle_config,
 )
+from drive_cycles.regen_model import split_regen_and_friction
 
 
 G_MPS2 = 9.80665
@@ -182,33 +183,18 @@ def analyze_longitudinal_profile(
                 )
 
         else:
-            potential_dc_regen = (
-                wheel_power
-                * config.regenerative_efficiency
+            split = split_regen_and_friction(
+                speed_mps=v,
+                braking_wheel_power_w=abs(wheel_power),
+                regenerative_efficiency=config.regenerative_efficiency,
+                max_regen_dc_power_w=config.max_regen_power_w,
+                cutoff_speed_mps=config.regen_cutoff_speed_mps,
+                full_regen_speed_mps=config.regen_full_speed_mps,
             )
 
             # Negative DC power means energy returned to the DC bus.
-            dc_power = max(
-                potential_dc_regen,
-                -config.max_regen_power_w,
-            )
-
-            if potential_dc_regen < -config.max_regen_power_w:
-                recovered_wheel_power = (
-                    -config.max_regen_power_w
-                    / max(
-                        config.regenerative_efficiency,
-                        1e-9,
-                    )
-                    if config.regenerative_efficiency > 0.0
-                    else 0.0
-                )
-
-                friction_brake_power = max(
-                    0.0,
-                    abs(wheel_power)
-                    - abs(recovered_wheel_power),
-                )
+            dc_power = -split.recovered_dc_power_w
+            friction_brake_power = split.friction_brake_power_w
 
         rows.append(
             LongitudinalSample(

@@ -234,3 +234,97 @@ When you press `F7` you can now open a new window called `validation_lab_window.
   2. For the auxiliary consumption I will add a configurable auxiliary load.
 
   3. For the route not being comparable to WLTC class 3, I will feed the EGO vehicle into a WLTC Class 3 Speed Trace and then compare to the German WLTP benchmark.
+
+---
+
+Files Update: (For Regeneration Model) 
+
+- `regen_model.py`: Added the reusable regeneration logic that applies low-speed fade, regen power limiting, and splits braking between regenerative and friction braking.
+- `vehicle_config.py`: Extended the vehicle configuration loader so the YAML can define `regen_cutoff_speed_mps` and `regen_full_speed_mps`
+- `vehicle_dynamics.py`: Updated the live vehicle physics so braking now uses the new realistic regen/friction blending instead of assuming all negative wheel power can be regenerated.
+- `longitudinal_profile.py`: updated the offline drive-cycle energy calculation to use the exact same regen model as the live simulation.
+- `vehicle_route_validation.py`: expanded the validation calculations to report available braking energy, recovered regen energy, friction-brake loss, and mission-level regen capture efficiency
+- `validation_lab_window.py`: updated the `F7` GUI so that in the Vehicle/Route tab visibly shows the new detailed braking and regeneration energy breakdown.
+- `tesla_model3_lr_rwd.yaml`: defined `regen_cutoff_speed_mps` and `regen_full_speed_mps` based of uncalibrated modelling assumptions.
+
+---
+
+**Test 3: Vehicle/Route**
+
+- Start: 172 Neckarstrasse
+
+- Destination: 47 Pfaffenwaldring
+
+- Results:
+
+  ![	](./assets/image-20260817195429175.png)
+
+  - This will tell me where the extra energy is coming from.
+
+  - We see there is a big difference between the simulated consumption and the benchmark:
+
+    ```
+    Simulated consumption     237.07 Wh/km
+    German WLTP benchmark     136.00 Wh/km
+    Difference               +101.07 Wh/km
+    ```
+
+  - From the breakdown we see that the route elevation is the main reason for  the high consumption. 
+
+    ![image-20260817195808617](./assets/image-20260817195808617.png)
+
+  - Is 237.08 Wh/km result correct?
+
+    It actually might be.
+
+    So YES:
+    The Neckarstraße -> Pfaffenwaldring route genuinely climbs
+    roughly a couple hundred meters, so it should consume noticeably more than a flat WLTP-type drive.
+
+    BUT:
+    The current DEM grade trace has too many sharp artefacts, so
+    237 Wh/km may be overstated.
+
+    ![image-20260817200829109](./assets/image-20260817200829109.png)
+
+---
+
+**Calibration**: To fix the elevation data issue, we are going to follow this pipeline now:
+
+```
+raw DEM elevations
+        ↓
+reject isolated peak/trough spikes
+        ↓
+distance-based smoothing over 25 m
+        ↓
+calculate grade across a 25 m baseline
+        ↓
+apply final ±15° road-grade sanity guard
+```
+
+- This preserves raw start and end elevations
+- Rejects spikes when the elevation jumps sharply up/down which is typically DEM noise
+- Grade is no longer calculated between tiny adjacent OSM nodes.
+- The 25m baseline means several short segments effectively share the same slope
+
+---
+
+**Test 4: Vehicle/Route**
+
+- Start: 172 Neckarstrasse
+
+- Destination: 47 Pfaffenwaldring
+
+- Results:
+
+  ![image-20260817221555370](./assets/image-20260817221555370.png)
+
+  - The smoothing worked, the ~217m net climb looks physically possible, but now there is evidence that some grades are hitting the new +- 15 degrees cap.
+
+  - Need to see why this is happening, so and update to the validation lab window.
+
+    - Officially validated: It's because its actually going up and down hills. We can see this in the updated `F7` panel.
+
+      ![image-20260817230931605](./assets/image-20260817230931605.png)
+
