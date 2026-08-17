@@ -146,6 +146,7 @@ class MissionProfileLab:
             "peak_tj",
             "delta_tj",
             "damage",
+            "damage_vs_best",
             "cycles",
         )
 
@@ -168,7 +169,8 @@ class MissionProfileLab:
             "energy": "Net energy (kWh)",
             "peak_tj": "Peak Tj (C)",
             "delta_tj": "Max ΔTj (C)",
-            "damage": "Relative damage",
+            "damage": "Relative damage index",
+            "damage_vs_best": "Damage vs best",
             "cycles": "Eq. cycles",
         }
 
@@ -181,7 +183,8 @@ class MissionProfileLab:
             "energy": 110,
             "peak_tj": 90,
             "delta_tj": 95,
-            "damage": 115,
+            "damage": 135,
+            "damage_vs_best": 105,
             "cycles": 80,
         }
 
@@ -401,6 +404,7 @@ class MissionProfileLab:
                         "",
                         row.get("analysis_error", ""),
                         "",
+                        "",
                     ),
                 )
                 continue
@@ -418,6 +422,11 @@ class MissionProfileLab:
                     f"{float(row['peak_junction_temperature_c']):.2f}",
                     f"{float(row['maximum_delta_tj_c']):.3f}",
                     f"{float(row['total_relative_damage']):.3e}",
+                    (
+                        "inf x"
+                        if float(row.get("damage_vs_best", 1.0)) == float("inf")
+                        else f"{float(row.get('damage_vs_best', 1.0)):.2f} x"
+                    ),
                     f"{float(row['equivalent_full_cycles']):.2f}",
                 ),
             )

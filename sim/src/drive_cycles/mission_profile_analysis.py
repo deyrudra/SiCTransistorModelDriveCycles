@@ -189,6 +189,31 @@ def _analyze_one_profile(args):
     return data
 
 
+def add_damage_vs_best(results):
+    successful = [
+        row for row in results
+        if row.get("analysis_ok", True)
+        and "total_relative_damage" in row
+    ]
+    if not successful:
+        return results
+
+    damages = [
+        max(0.0, float(row["total_relative_damage"]))
+        for row in successful
+    ]
+    minimum = min(damages)
+
+    if minimum <= 0.0:
+        for row, damage in zip(successful, damages):
+            row["damage_vs_best"] = 1.0 if damage <= 0.0 else float("inf")
+    else:
+        for row, damage in zip(successful, damages):
+            row["damage_vs_best"] = damage / minimum
+
+    return results
+
+
 def analyze_profiles_parallel(cycle_paths, vehicle_config_path, max_workers=None):
     paths = [str(Path(path).resolve()) for path in cycle_paths]
     if not paths:
@@ -233,6 +258,7 @@ def analyze_profiles_parallel(cycle_paths, vehicle_config_path, max_workers=None
             10**9,
         )
     )
+    add_damage_vs_best(results)
     return results
 
 
@@ -275,7 +301,7 @@ def export_research_bundle(results, export_root, title="SiC mission-profile comp
         "peak_case_temperature_c", "peak_junction_temperature_c",
         "minimum_junction_temperature_c",
         "rainflow_cycle_count", "equivalent_full_cycles",
-        "maximum_delta_tj_c", "total_relative_damage",
+        "maximum_delta_tj_c", "total_relative_damage", "damage_vs_best",
         "reliability_calibrated", "nonconverged_thermal_samples",
         "overtemperature_samples",
     ]
