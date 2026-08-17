@@ -354,7 +354,8 @@ class ValidationLab(tk.Tk):
             breakdown_frame,
             text=(
                 "Capture efficiency = recovered DC energy / available wheel braking energy. "
-                "Inertial and grade terms are signed."
+                "Inertial and grade terms are signed. Auxiliary loads are battery-side "
+                "and are not passed through the traction inverter loss model."
             ),
             foreground="#666666",
             wraplength=430,
@@ -575,7 +576,15 @@ class ValidationLab(tk.Tk):
                 result.friction_brake_energy_breakdown_kwh,
             ),
             (
-                "Auxiliary / base electrical energy",
+                "Base auxiliary electrical energy",
+                result.base_auxiliary_energy_kwh,
+            ),
+            (
+                "HVAC energy",
+                result.hvac_energy_kwh,
+            ),
+            (
+                "Total auxiliary electrical energy",
                 result.auxiliary_energy_kwh,
             ),
             (
@@ -740,7 +749,10 @@ class ValidationLab(tk.Tk):
             f"  Recovered regen:       {-result.recovered_regen_energy_breakdown_kwh:+.6f} kWh",
             f"  Friction braking:      {result.friction_brake_energy_breakdown_kwh:+.6f} kWh",
             f"  Regen capture eff.:    {result.regen_capture_efficiency_percent:.2f} %",
-            f"  Auxiliary/base:        {result.auxiliary_energy_kwh:+.6f} kWh",
+            f"  Base auxiliary:        {result.base_auxiliary_energy_kwh:+.6f} kWh",
+            f"  HVAC:                  {result.hvac_energy_kwh:+.6f} kWh",
+            f"  Total auxiliary:       {result.auxiliary_energy_kwh:+.6f} kWh",
+            f"  Active aux power:      {result.auxiliary_power_w:.0f} W",
             f"  Net battery estimate:  {result.net_battery_energy_breakdown_kwh:+.6f} kWh",
             f"  Ledger consumption:    {result.breakdown_wh_per_km:.2f} Wh/km",
             f"  Ledger - model net DC: {ledger_difference_kwh:+.6f} kWh",

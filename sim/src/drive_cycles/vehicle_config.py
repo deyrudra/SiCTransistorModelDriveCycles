@@ -20,6 +20,9 @@ class VehicleDynamicsConfig:
     max_regen_power_w: float
     regen_cutoff_speed_mps: float
     regen_full_speed_mps: float
+    base_auxiliary_power_w: float
+    hvac_power_w: float
+    hvac_enabled: bool
     max_acceleration_mps2: float
     comfortable_braking_mps2: float
     emergency_braking_mps2: float
@@ -60,6 +63,31 @@ def _number(
     return value
 
 
+def _boolean(
+    section: dict[str, Any],
+    key: str,
+    default: bool,
+) -> bool:
+    raw = section.get(key, default)
+
+    if isinstance(raw, bool):
+        return raw
+
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+
+    if isinstance(raw, str):
+        normalized = raw.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+
+    raise ValueError(
+        f"Configuration value {key!r} must be boolean, got {raw!r}."
+    )
+
+
 def load_vehicle_config(path: str | Path) -> VehicleDynamicsConfig:
     config_path = Path(path).expanduser().resolve()
 
@@ -75,6 +103,7 @@ def load_vehicle_config(path: str | Path) -> VehicleDynamicsConfig:
     vehicle = _section(data, "vehicle")
     powertrain = _section(data, "powertrain")
     driver = _section(data, "driver")
+    auxiliary = _section(data, "auxiliary")
 
     name = str(vehicle.get("name", config_path.stem)).strip() or config_path.stem
 
@@ -109,6 +138,23 @@ def load_vehicle_config(path: str | Path) -> VehicleDynamicsConfig:
             "regen_full_speed_mps",
             5.0,
             minimum=0.01,
+        ),
+        base_auxiliary_power_w=_number(
+            auxiliary,
+            "base_power_w",
+            300.0,
+            minimum=0.0,
+        ),
+        hvac_power_w=_number(
+            auxiliary,
+            "hvac_power_w",
+            1500.0,
+            minimum=0.0,
+        ),
+        hvac_enabled=_boolean(
+            auxiliary,
+            "hvac_enabled",
+            False,
         ),
         max_acceleration_mps2=_number(
             powertrain, "max_acceleration_mps2", 1.8, minimum=0.1

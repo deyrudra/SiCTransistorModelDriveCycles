@@ -84,7 +84,10 @@ class VehicleRouteValidation:
     recovered_regen_energy_breakdown_kwh: float
     friction_brake_energy_breakdown_kwh: float
     regen_capture_efficiency_percent: float
+    base_auxiliary_energy_kwh: float
+    hvac_energy_kwh: float
     auxiliary_energy_kwh: float
+    auxiliary_power_w: float
     net_battery_energy_breakdown_kwh: float
     breakdown_wh_per_km: float
 
@@ -301,14 +304,35 @@ def _vehicle_energy_parameters(vehicle_config_path):
                 return float(mapping[name])
         return float(default)
 
-    aux_w = pick(
+    base_aux_w = pick(
         auxiliary,
         ("base_power_w", "auxiliary_power_w"),
-        pick(
-            powertrain,
-            ("auxiliary_power_w", "base_auxiliary_power_w"),
-            pick(vehicle, ("auxiliary_power_w",), 0.0),
-        ),
+        300.0,
+    )
+    hvac_w = pick(
+        auxiliary,
+        ("hvac_power_w",),
+        1500.0,
+    )
+
+    raw_hvac_enabled = auxiliary.get(
+        "hvac_enabled",
+        False,
+    )
+    if isinstance(raw_hvac_enabled, str):
+        hvac_enabled = (
+            raw_hvac_enabled.strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+    else:
+        hvac_enabled = bool(
+            raw_hvac_enabled
+        )
+
+    active_hvac_w = (
+        max(0.0, hvac_w)
+        if hvac_enabled
+        else 0.0
     )
 
     return {
@@ -337,7 +361,11 @@ def _vehicle_energy_parameters(vehicle_config_path):
         "regen_full_speed_mps": pick(
             powertrain, ("regen_full_speed_mps",), 5.0
         ),
-        "auxiliary_power_w": aux_w,
+        "base_auxiliary_power_w": max(0.0, base_aux_w),
+        "hvac_power_w": max(0.0, hvac_w),
+        "hvac_enabled": hvac_enabled,
+        "active_hvac_power_w": active_hvac_w,
+        "auxiliary_power_w": max(0.0, base_aux_w) + active_hvac_w,
     }
 
 
@@ -349,7 +377,18 @@ def _calculate_energy_breakdown(times, speeds, grades_deg, params):
     eta_drive = params["drivetrain_efficiency"]
     eta_regen = params["regen_efficiency"]
     max_regen_w = params["max_regen_power_w"]
-    aux_w = max(0.0, params["auxiliary_power_w"])
+    base_aux_w = max(
+        0.0,
+        params["base_auxiliary_power_w"],
+    )
+    active_hvac_w = max(
+        0.0,
+        params["active_hvac_power_w"],
+    )
+    aux_w = (
+        base_aux_w
+        + active_hvac_w
+    )
 
     if not 0.0 < eta_drive <= 1.0:
         raise ValueError("drivetrain_efficiency must be in (0, 1].")
@@ -359,6 +398,8 @@ def _calculate_energy_breakdown(times, speeds, grades_deg, params):
     aero_j = roll_j = inertial_j = grade_j = 0.0
     positive_wheel_j = negative_wheel_j = 0.0
     battery_traction_j = regen_j = friction_j = auxiliary_j = 0.0
+    base_auxiliary_j = 0.0
+    hvac_j = 0.0
 
     for i in range(1, len(times)):
         dt = times[i] - times[i - 1]
@@ -402,6 +443,8 @@ def _calculate_energy_breakdown(times, speeds, grades_deg, params):
             regen_j += split.recovered_dc_power_w * dt
             friction_j += split.friction_brake_power_w * dt
 
+        base_auxiliary_j += base_aux_w * dt
+        hvac_j += active_hvac_w * dt
         auxiliary_j += aux_w * dt
 
     drivetrain_loss_j = battery_traction_j - positive_wheel_j
@@ -423,7 +466,10 @@ def _calculate_energy_breakdown(times, speeds, grades_deg, params):
             if negative_wheel_j > 0.0
             else 0.0
         ),
+        "base_auxiliary_energy_kwh": base_auxiliary_j * kwh,
+        "hvac_energy_kwh": hvac_j * kwh,
         "auxiliary_energy_kwh": auxiliary_j * kwh,
+        "auxiliary_power_w": aux_w,
         "net_battery_energy_breakdown_kwh": net_battery_j * kwh,
     }
 
@@ -877,7 +923,12 @@ def validate_vehicle_route(
         regen_capture_efficiency_percent=breakdown[
             "regen_capture_efficiency_percent"
         ],
+        base_auxiliary_energy_kwh=breakdown[
+            "base_auxiliary_energy_kwh"
+        ],
+        hvac_energy_kwh=breakdown["hvac_energy_kwh"],
         auxiliary_energy_kwh=breakdown["auxiliary_energy_kwh"],
+        auxiliary_power_w=breakdown["auxiliary_power_w"],
         net_battery_energy_breakdown_kwh=breakdown[
             "net_battery_energy_breakdown_kwh"
         ],

@@ -33,6 +33,7 @@ from drive_cycles.vehicle_config import (
     load_vehicle_config,
 )
 from drive_cycles.regen_model import split_regen_and_friction
+from drive_cycles.auxiliary_model import total_auxiliary_power_w
 
 
 G_MPS2 = 9.80665
@@ -54,6 +55,8 @@ class LongitudinalSample:
 
     wheel_power_w: float
     dc_power_w: float
+    auxiliary_power_w: float
+    battery_power_w: float
     friction_brake_power_w: float
 
 
@@ -66,6 +69,10 @@ class LongitudinalResult:
     traction_energy_kwh: float
     recovered_energy_kwh: float
     friction_brake_energy_kwh: float
+    base_auxiliary_energy_kwh: float
+    hvac_energy_kwh: float
+    total_auxiliary_energy_kwh: float
+    net_battery_energy_kwh: float
     peak_wheel_power_kw: float
     peak_dc_power_kw: float
     peak_regen_power_kw: float
@@ -120,7 +127,21 @@ def analyze_longitudinal_profile(
     traction_energy_j = 0.0
     recovered_energy_j = 0.0
     friction_energy_j = 0.0
+    auxiliary_energy_j = 0.0
     distance_m = 0.0
+
+    auxiliary_power_w = total_auxiliary_power_w(
+        config
+    )
+    base_auxiliary_power_w = max(
+        0.0,
+        config.base_auxiliary_power_w,
+    )
+    active_hvac_power_w = (
+        max(0.0, config.hvac_power_w)
+        if config.hvac_enabled
+        else 0.0
+    )
 
     peak_wheel_power_w = 0.0
     peak_dc_power_w = 0.0
@@ -196,6 +217,11 @@ def analyze_longitudinal_profile(
             dc_power = -split.recovered_dc_power_w
             friction_brake_power = split.friction_brake_power_w
 
+        battery_power = (
+            dc_power
+            + auxiliary_power_w
+        )
+
         rows.append(
             LongitudinalSample(
                 time_s=t,
@@ -209,6 +235,8 @@ def analyze_longitudinal_profile(
                 force_total_n=force_total,
                 wheel_power_w=wheel_power,
                 dc_power_w=dc_power,
+                auxiliary_power_w=auxiliary_power_w,
+                battery_power_w=battery_power,
                 friction_brake_power_w=friction_brake_power,
             )
         )
@@ -249,17 +277,59 @@ def analyze_longitudinal_profile(
                 * dt
             )
 
+            auxiliary_energy_j += (
+                auxiliary_power_w
+                * dt
+            )
+
         previous_time = t
         previous_speed = v
+
+    duration_s = (
+        profile.time_s[-1]
+        - profile.time_s[0]
+    )
+
+    base_auxiliary_energy_j = (
+        base_auxiliary_power_w
+        * duration_s
+    )
+    hvac_energy_j = (
+        active_hvac_power_w
+        * duration_s
+    )
+
+    traction_kwh = (
+        traction_energy_j
+        / 3_600_000.0
+    )
+    recovered_kwh = (
+        recovered_energy_j
+        / 3_600_000.0
+    )
+    auxiliary_kwh = (
+        auxiliary_energy_j
+        / 3_600_000.0
+    )
+
+    net_battery_kwh = (
+        traction_kwh
+        - recovered_kwh
+        + auxiliary_kwh
+    )
 
     return LongitudinalResult(
         samples=tuple(rows),
         source_cycle=profile.source_path,
         vehicle_name=config.name,
         distance_km=distance_m / 1000.0,
-        traction_energy_kwh=traction_energy_j / 3_600_000.0,
-        recovered_energy_kwh=recovered_energy_j / 3_600_000.0,
+        traction_energy_kwh=traction_kwh,
+        recovered_energy_kwh=recovered_kwh,
         friction_brake_energy_kwh=friction_energy_j / 3_600_000.0,
+        base_auxiliary_energy_kwh=base_auxiliary_energy_j / 3_600_000.0,
+        hvac_energy_kwh=hvac_energy_j / 3_600_000.0,
+        total_auxiliary_energy_kwh=auxiliary_kwh,
+        net_battery_energy_kwh=net_battery_kwh,
         peak_wheel_power_kw=peak_wheel_power_w / 1000.0,
         peak_dc_power_kw=peak_dc_power_w / 1000.0,
         peak_regen_power_kw=peak_regen_power_w / 1000.0,
@@ -297,6 +367,18 @@ def write_longitudinal_csv(
         handle.write(
             f"# recovered_energy_kwh={result.recovered_energy_kwh:.9f}\n"
         )
+        handle.write(
+            f"# base_auxiliary_energy_kwh={result.base_auxiliary_energy_kwh:.9f}\n"
+        )
+        handle.write(
+            f"# hvac_energy_kwh={result.hvac_energy_kwh:.9f}\n"
+        )
+        handle.write(
+            f"# total_auxiliary_energy_kwh={result.total_auxiliary_energy_kwh:.9f}\n"
+        )
+        handle.write(
+            f"# net_battery_energy_kwh={result.net_battery_energy_kwh:.9f}\n"
+        )
 
         writer = csv.writer(handle)
 
@@ -313,6 +395,8 @@ def write_longitudinal_csv(
                 "force_total_n",
                 "wheel_power_w",
                 "dc_power_w",
+                "auxiliary_power_w",
+                "battery_power_w",
                 "friction_brake_power_w",
             ]
         )
@@ -331,6 +415,8 @@ def write_longitudinal_csv(
                     f"{row.force_total_n:.6f}",
                     f"{row.wheel_power_w:.6f}",
                     f"{row.dc_power_w:.6f}",
+                    f"{row.auxiliary_power_w:.6f}",
+                    f"{row.battery_power_w:.6f}",
                     f"{row.friction_brake_power_w:.6f}",
                 ]
             )

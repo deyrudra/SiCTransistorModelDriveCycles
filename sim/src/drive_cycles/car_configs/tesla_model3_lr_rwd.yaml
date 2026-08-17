@@ -39,6 +39,20 @@ powertrain:
   comfortable_braking_mps2: 2.5
   emergency_braking_mps2: 6.0
 
+
+auxiliary:
+  # Battery-side always-on electrical load assumption.
+  # This is NOT a Tesla-published calibration value.
+  # It represents low-voltage electronics, controllers, pumps, etc.
+  base_power_w: 300
+
+  # Optional climate-control scenario load.
+  # Kept disabled for the WLTP-oriented baseline comparison.
+  # When enabled, this is added directly to battery demand and is NOT
+  # passed through the traction inverter / SiC loss model.
+  hvac_power_w: 1500
+  hvac_enabled: false
+
 driver:
   safe_distance_m: 5.0
   time_headway_s: 1.5

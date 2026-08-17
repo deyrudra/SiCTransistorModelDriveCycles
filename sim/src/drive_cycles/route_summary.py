@@ -56,6 +56,9 @@ class RouteSummary:
 
     traction_energy_kwh: float
     recovered_energy_kwh: float
+    base_auxiliary_energy_kwh: float
+    hvac_energy_kwh: float
+    total_auxiliary_energy_kwh: float
     net_dc_energy_kwh: float
     friction_brake_energy_kwh: float
 
@@ -142,8 +145,7 @@ def analyze_route_summary(
     )
 
     net_energy_kwh = (
-        longitudinal.traction_energy_kwh
-        - longitudinal.recovered_energy_kwh
+        longitudinal.net_battery_energy_kwh
     )
 
     return RouteSummary(
@@ -157,6 +159,9 @@ def analyze_route_summary(
 
         traction_energy_kwh=longitudinal.traction_energy_kwh,
         recovered_energy_kwh=longitudinal.recovered_energy_kwh,
+        base_auxiliary_energy_kwh=longitudinal.base_auxiliary_energy_kwh,
+        hvac_energy_kwh=longitudinal.hvac_energy_kwh,
+        total_auxiliary_energy_kwh=longitudinal.total_auxiliary_energy_kwh,
         net_dc_energy_kwh=net_energy_kwh,
         friction_brake_energy_kwh=longitudinal.friction_brake_energy_kwh,
 

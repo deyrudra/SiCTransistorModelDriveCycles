@@ -5,6 +5,7 @@ import math
 
 from drive_cycles.vehicle_config import VehicleDynamicsConfig
 from drive_cycles.regen_model import split_regen_and_friction
+from drive_cycles.auxiliary_model import total_auxiliary_power_w
 
 
 G_MPS2 = 9.80665
@@ -25,6 +26,8 @@ class LongitudinalForces:
     requested_wheel_power_w: float
     actual_wheel_power_w: float
     dc_power_w: float
+    auxiliary_power_w: float
+    battery_power_w: float
     friction_brake_power_w: float
     propulsion_power_limited: bool
     regen_power_limited: bool
@@ -172,6 +175,11 @@ class LongitudinalVehicleModel:
             friction_brake_power = split.friction_brake_power_w
             regen_limited = friction_brake_power > 1e-9
 
+        auxiliary_power = total_auxiliary_power_w(
+            self.config
+        )
+        battery_power = dc_power + auxiliary_power
+
         return LongitudinalForces(
             requested_acceleration_mps2=requested_a,
             actual_acceleration_mps2=actual_acceleration,
@@ -184,6 +192,8 @@ class LongitudinalVehicleModel:
             requested_wheel_power_w=requested_wheel_power,
             actual_wheel_power_w=actual_wheel_power,
             dc_power_w=dc_power,
+            auxiliary_power_w=auxiliary_power,
+            battery_power_w=battery_power,
             friction_brake_power_w=friction_brake_power,
             propulsion_power_limited=propulsion_limited,
             regen_power_limited=regen_limited,

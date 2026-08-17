@@ -328,3 +328,30 @@ apply final ±15° road-grade sanity guard
 
       ![image-20260817230931605](./assets/image-20260817230931605.png)
 
+---
+
+**Update:** Auxiliary Model
+
+```
+auxiliary_model.py
+vehicle_config.py
+vehicle_dynamics.py
+longitudinal_profile.py
+route_summary.py
+vehicle_route_validation.py
+validation_lab_window.py
+Code
+tesla_model3_lr_rwd.yaml
+```
+
+- All of this was updated so that `auxiliary_model.py` can be added.
+
+  - You can enable and disable the HVAC (in the YAML config file)
+    - disable for WLTP-oriented comparison
+
+- Here is the energy details in the new validation lab window:
+
+  ![image-20260817235655084](./assets/image-20260817235655084.png)
+
+
+
