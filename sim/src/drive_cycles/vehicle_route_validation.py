@@ -1,4 +1,5 @@
 from __future__ import annotations
+import sys
 
 """
 Vehicle / route layer validation.
@@ -29,6 +30,11 @@ from pathlib import Path
 from statistics import mean
 
 import yaml
+
+SRC = Path(__file__).resolve().parents[2] / "src"
+if SRC.exists():
+    sys.path.append(str(SRC))
+
 
 from drive_cycles.route_summary import analyze_route_summary
 
@@ -72,6 +78,18 @@ class VehicleRouteValidation:
     energy_error_percent: float
     recovered_fraction_percent: float
 
+    aerodynamic_energy_kwh: float
+    rolling_resistance_energy_kwh: float
+    inertial_energy_kwh: float
+    grade_energy_kwh: float
+    positive_wheel_traction_energy_kwh: float
+    negative_wheel_energy_kwh: float
+    drivetrain_loss_energy_kwh: float
+    recovered_regen_energy_breakdown_kwh: float
+    auxiliary_energy_kwh: float
+    net_battery_energy_breakdown_kwh: float
+    breakdown_wh_per_km: float
+
     wltc_average_speed_delta_kmh: float
     wltc_peak_speed_delta_kmh: float
     wltc_stopped_time_delta_percent: float
@@ -113,9 +131,11 @@ def _load_cycle_samples(
 ) -> tuple[
     list[float],
     list[float],
+    list[float],
 ]:
     times = []
     speeds = []
+    grades = []
 
     with Path(path).open(
         "r",
@@ -139,13 +159,16 @@ def _load_cycle_samples(
             speeds.append(
                 float(row["v_mps"])
             )
+            grades.append(
+                float(row.get("grade_deg", 0.0) or 0.0)
+            )
 
     if len(times) < 2:
         raise ValueError(
             "Mission profile needs at least two samples."
         )
 
-    return times, speeds
+    return times, speeds, grades
 
 
 def _acceleration_samples(
@@ -243,6 +266,129 @@ def _load_validation_benchmark(
     }
 
 
+
+AIR_DENSITY_KG_M3 = 1.225
+GRAVITY_MPS2 = 9.80665
+
+
+def _vehicle_energy_parameters(vehicle_config_path):
+    with Path(vehicle_config_path).open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+
+    vehicle = data.get("vehicle", {})
+    powertrain = data.get("powertrain", {})
+    auxiliary = data.get("auxiliary", {})
+
+    def pick(mapping, names, default):
+        for name in names:
+            if mapping.get(name) is not None:
+                return float(mapping[name])
+        return float(default)
+
+    aux_w = pick(
+        auxiliary,
+        ("base_power_w", "auxiliary_power_w"),
+        pick(
+            powertrain,
+            ("auxiliary_power_w", "base_auxiliary_power_w"),
+            pick(vehicle, ("auxiliary_power_w",), 0.0),
+        ),
+    )
+
+    return {
+        "mass_kg": pick(vehicle, ("mass_kg",), 1822.0),
+        "frontal_area_m2": pick(
+            vehicle, ("frontal_area_m2", "frontal_area"), 2.22
+        ),
+        "drag_coefficient": pick(
+            vehicle, ("drag_coefficient", "cd"), 0.23
+        ),
+        "rolling_coefficient": pick(
+            vehicle, ("rolling_resistance_coefficient", "crr"), 0.010
+        ),
+        "drivetrain_efficiency": pick(
+            powertrain, ("drivetrain_efficiency", "traction_efficiency"), 0.92
+        ),
+        "regen_efficiency": pick(
+            powertrain, ("regenerative_efficiency", "regen_efficiency"), 0.80
+        ),
+        "max_regen_power_w": pick(
+            powertrain, ("max_regen_power_w",), float("inf")
+        ),
+        "auxiliary_power_w": aux_w,
+    }
+
+
+def _calculate_energy_breakdown(times, speeds, grades_deg, params):
+    m = params["mass_kg"]
+    area = params["frontal_area_m2"]
+    cd = params["drag_coefficient"]
+    crr = params["rolling_coefficient"]
+    eta_drive = params["drivetrain_efficiency"]
+    eta_regen = params["regen_efficiency"]
+    max_regen_w = params["max_regen_power_w"]
+    aux_w = max(0.0, params["auxiliary_power_w"])
+
+    if not 0.0 < eta_drive <= 1.0:
+        raise ValueError("drivetrain_efficiency must be in (0, 1].")
+    if not 0.0 <= eta_regen <= 1.0:
+        raise ValueError("regenerative_efficiency must be in [0, 1].")
+
+    aero_j = roll_j = inertial_j = grade_j = 0.0
+    positive_wheel_j = negative_wheel_j = 0.0
+    battery_traction_j = regen_j = auxiliary_j = 0.0
+
+    for i in range(1, len(times)):
+        dt = times[i] - times[i - 1]
+        if dt <= 0.0:
+            continue
+
+        v0 = max(0.0, speeds[i - 1])
+        v1 = max(0.0, speeds[i])
+        v = 0.5 * (v0 + v1)
+        a = (v1 - v0) / dt
+        theta = math.radians(0.5 * (grades_deg[i - 1] + grades_deg[i]))
+
+        p_aero = 0.5 * AIR_DENSITY_KG_M3 * cd * area * v**3
+        p_roll = m * GRAVITY_MPS2 * crr * math.cos(theta) * v
+        p_grade = m * GRAVITY_MPS2 * math.sin(theta) * v
+        p_inertial = m * a * v
+        p_wheel = p_aero + p_roll + p_grade + p_inertial
+
+        aero_j += p_aero * dt
+        roll_j += p_roll * dt
+        grade_j += p_grade * dt
+        inertial_j += p_inertial * dt
+
+        if p_wheel >= 0.0:
+            wheel_j = p_wheel * dt
+            positive_wheel_j += wheel_j
+            battery_traction_j += wheel_j / eta_drive
+        else:
+            braking_w = -p_wheel
+            negative_wheel_j += braking_w * dt
+            regen_j += min(braking_w, max_regen_w) * eta_regen * dt
+
+        auxiliary_j += aux_w * dt
+
+    drivetrain_loss_j = battery_traction_j - positive_wheel_j
+    net_battery_j = battery_traction_j - regen_j + auxiliary_j
+    kwh = 1.0 / 3_600_000.0
+
+    return {
+        "aerodynamic_energy_kwh": aero_j * kwh,
+        "rolling_resistance_energy_kwh": roll_j * kwh,
+        "inertial_energy_kwh": inertial_j * kwh,
+        "grade_energy_kwh": grade_j * kwh,
+        "positive_wheel_traction_energy_kwh": positive_wheel_j * kwh,
+        "negative_wheel_energy_kwh": negative_wheel_j * kwh,
+        "drivetrain_loss_energy_kwh": drivetrain_loss_j * kwh,
+        "recovered_regen_energy_breakdown_kwh": regen_j * kwh,
+        "auxiliary_energy_kwh": auxiliary_j * kwh,
+        "net_battery_energy_breakdown_kwh": net_battery_j * kwh,
+    }
+
+
 def _assessment(
     error_percent: float,
 ) -> str:
@@ -276,8 +422,18 @@ def validate_vehicle_route(
         vehicle_config_path,
     )
 
-    times, speeds = _load_cycle_samples(
+    times, speeds, grades = _load_cycle_samples(
         cycle_path
+    )
+
+    energy_params = _vehicle_energy_parameters(
+        vehicle_config_path
+    )
+    breakdown = _calculate_energy_breakdown(
+        times,
+        speeds,
+        grades,
+        energy_params,
     )
 
     accelerations = _acceleration_samples(
@@ -441,6 +597,26 @@ def validate_vehicle_route(
         energy_error_wh_per_km=energy_error_wh_per_km,
         energy_error_percent=energy_error_percent,
         recovered_fraction_percent=recovered_fraction,
+        aerodynamic_energy_kwh=breakdown["aerodynamic_energy_kwh"],
+        rolling_resistance_energy_kwh=breakdown["rolling_resistance_energy_kwh"],
+        inertial_energy_kwh=breakdown["inertial_energy_kwh"],
+        grade_energy_kwh=breakdown["grade_energy_kwh"],
+        positive_wheel_traction_energy_kwh=breakdown[
+            "positive_wheel_traction_energy_kwh"
+        ],
+        negative_wheel_energy_kwh=breakdown["negative_wheel_energy_kwh"],
+        drivetrain_loss_energy_kwh=breakdown["drivetrain_loss_energy_kwh"],
+        recovered_regen_energy_breakdown_kwh=breakdown[
+            "recovered_regen_energy_breakdown_kwh"
+        ],
+        auxiliary_energy_kwh=breakdown["auxiliary_energy_kwh"],
+        net_battery_energy_breakdown_kwh=breakdown[
+            "net_battery_energy_breakdown_kwh"
+        ],
+        breakdown_wh_per_km=(
+            breakdown["net_battery_energy_breakdown_kwh"] * 1000.0 / distance_km
+            if distance_km > 0.0 else math.nan
+        ),
         wltc_average_speed_delta_kmh=(
             average_speed_kmh
             - WLTC_CLASS3_AVERAGE_SPEED_KMH

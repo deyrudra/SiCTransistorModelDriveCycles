@@ -67,7 +67,7 @@ class ValidationLab(tk.Tk):
         self.export_dir = export_dir
 
         self.title("SiC Drive-Cycle Validation Lab")
-        self.geometry("1420x820")
+        self.geometry("1500x900")
         self.minsize(1100, 680)
 
         self.profile_paths: list[Path] = []
@@ -294,20 +294,57 @@ class ValidationLab(tk.Tk):
         summary_frame.rowconfigure(0, weight=1)
         summary_frame.columnconfigure(0, weight=1)
 
-        detail_frame = ttk.LabelFrame(
+        lower = ttk.Panedwindow(
             right,
+            orient="horizontal",
+        )
+        lower.pack(fill="x", pady=(8, 0))
+
+        breakdown_frame = ttk.LabelFrame(
+            lower,
+            text="Energy breakdown",
+            padding=6,
+        )
+        detail_frame = ttk.LabelFrame(
+            lower,
             text="Selected result details",
             padding=6,
         )
-        detail_frame.pack(fill="x", pady=(8, 0))
+
+        lower.add(breakdown_frame, weight=2)
+        lower.add(detail_frame, weight=3)
+
+        self.breakdown = ttk.Treeview(
+            breakdown_frame,
+            columns=("term", "kwh", "whkm"),
+            show="headings",
+            height=11,
+        )
+        self.breakdown.heading("term", text="Energy term")
+        self.breakdown.heading("kwh", text="kWh")
+        self.breakdown.heading("whkm", text="Wh/km")
+        self.breakdown.column("term", width=230, anchor="w")
+        self.breakdown.column("kwh", width=90, anchor="e")
+        self.breakdown.column("whkm", width=90, anchor="e")
+        self.breakdown.pack(fill="both", expand=True)
+
+        ttk.Label(
+            breakdown_frame,
+            text=(
+                "Inertial and grade terms are signed. "
+                "Recovered regen is shown as a negative battery contribution."
+            ),
+            foreground="#666666",
+            wraplength=430,
+        ).pack(anchor="w", pady=(5, 0))
 
         self.details = tk.Text(
             detail_frame,
-            height=12,
+            height=14,
             wrap="word",
             state="disabled",
         )
-        self.details.pack(fill="x")
+        self.details.pack(fill="both", expand=True)
 
         self.results.bind(
             "<<TreeviewSelect>>",
@@ -449,6 +486,58 @@ class ValidationLab(tk.Tk):
         self.results.see(item_id)
         self._show_selected_result()
 
+    def _populate_breakdown(self, result) -> None:
+        for item in self.breakdown.get_children():
+            self.breakdown.delete(item)
+
+        distance_km = result.distance_km
+
+        rows = [
+            ("Aerodynamic energy", result.aerodynamic_energy_kwh),
+            (
+                "Rolling-resistance energy",
+                result.rolling_resistance_energy_kwh,
+            ),
+            (
+                "Acceleration / inertial energy",
+                result.inertial_energy_kwh,
+            ),
+            ("Grade energy", result.grade_energy_kwh),
+            (
+                "Drivetrain losses",
+                result.drivetrain_loss_energy_kwh,
+            ),
+            (
+                "Recovered regen energy",
+                -result.recovered_regen_energy_breakdown_kwh,
+            ),
+            (
+                "Auxiliary energy",
+                result.auxiliary_energy_kwh,
+            ),
+            (
+                "Net battery energy",
+                result.net_battery_energy_breakdown_kwh,
+            ),
+        ]
+
+        for label, energy_kwh in rows:
+            wh_per_km = (
+                energy_kwh * 1000.0 / distance_km
+                if distance_km > 0.0
+                else 0.0
+            )
+
+            self.breakdown.insert(
+                "",
+                "end",
+                values=(
+                    label,
+                    f"{energy_kwh:+.6f}",
+                    f"{wh_per_km:+.2f}",
+                ),
+            )
+
     def _show_selected_result(self, _event=None) -> None:
         selected = self.results.selection()
         if not selected:
@@ -457,6 +546,13 @@ class ValidationLab(tk.Tk):
         result = self.result_by_item.get(selected[0])
         if result is None:
             return
+
+        self._populate_breakdown(result)
+
+        ledger_difference_kwh = (
+            result.net_battery_energy_breakdown_kwh
+            - result.net_dc_energy_kwh
+        )
 
         lines = [
             f"Profile: {result.profile_name}",
@@ -474,6 +570,18 @@ class ValidationLab(tk.Tk):
             f"  Difference:            {result.energy_error_wh_per_km:+.2f} Wh/km",
             f"  Percentage error:      {result.energy_error_percent:+.2f} %",
             f"  Assessment:            {result.energy_assessment}",
+            "",
+            "INDEPENDENT ENERGY LEDGER",
+            f"  Aerodynamic:           {result.aerodynamic_energy_kwh:+.6f} kWh",
+            f"  Rolling resistance:    {result.rolling_resistance_energy_kwh:+.6f} kWh",
+            f"  Inertial:              {result.inertial_energy_kwh:+.6f} kWh",
+            f"  Grade:                 {result.grade_energy_kwh:+.6f} kWh",
+            f"  Drivetrain losses:     {result.drivetrain_loss_energy_kwh:+.6f} kWh",
+            f"  Recovered regen:       {-result.recovered_regen_energy_breakdown_kwh:+.6f} kWh",
+            f"  Auxiliary:             {result.auxiliary_energy_kwh:+.6f} kWh",
+            f"  Net battery estimate:  {result.net_battery_energy_breakdown_kwh:+.6f} kWh",
+            f"  Ledger consumption:    {result.breakdown_wh_per_km:.2f} Wh/km",
+            f"  Ledger - model net DC: {ledger_difference_kwh:+.6f} kWh",
             "",
             "SPEED / ROUTE BEHAVIOUR",
             f"  Distance:              {result.distance_km:.3f} km",

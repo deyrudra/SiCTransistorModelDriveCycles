@@ -181,5 +181,56 @@ When you press `F7` you can now open a new window called `validation_lab_window.
     Net battery energy
     ```
 
-    
+    I've since updated the validation tab for Vehicle/Route (`vehicle_route_validation.py, validation_lab_window.py`)
 
+
+
+**Test 2: Vehicle/Route**
+
+- Start: 172 Neckarstrasse
+
+- Destination: HBF
+
+- Results: (same as before)
+
+  Simulated Stuttgart routes from 172 Neckarstrasse to Stuttgart HBF show that the EGO vehicle is using substantially less energy per km than the 136 Wh/km German WLTP Benchmark.
+
+  - Route 1: 104.91 Wh/km → **22.86% below** benchmark
+  - Route 2: 102.05 Wh/km → **24.96% below** benchmark
+  - Route 3: 97.50 Wh/km → **28.31% below **benchmark
+
+  ![image-20260817184735201](./assets/image-20260817184735201.png)
+
+  Notable information from the new window:
+
+  - Aerodynamic Contribution is 5.9 Wh/km, which is very small but it makes sense as the route is slow.
+  - 41.5% recovered-energy fraction is quite aggressive.
+    - This is the portion of kinetic and potential energy captured during braking that is successfully converted back into usable electricity. On average, cars recover about **23%** under the WLTP cycle.
+  - Auxiliary Energy = 0
+    - Right now, the simulated car uses no energy for pumps, computers, coolant circulation, battery management, lights, cabin electronics, etc.
+
+- What this tells us about the model?
+
+  1. Regeneration is way to optimistic, 41.5% is too much.
+  2. Auxiliary consumption is completely absent. 
+  3. The route itself is not comparable to WLTC, the average speed is only 26.8 km/h and peak is 37.7km/h, whereas WLTC class 3 contains much faster driving.
+     1. 
+
+- What to do next?
+
+  1. For regeneration, I will split the regeneration section into:
+
+     ```
+     Positive wheel traction energy
+     Available braking energy
+     Energy recovered by regen
+     Energy lost to friction braking
+     Regen capture efficiency
+     Auxiliary/base electrical energy
+     ```
+
+     Then introduce a realistic regen model with low-speed fade and friction brake blending.
+
+  2. For the auxiliary consumption I will add a configurable auxiliary load.
+
+  3. For the route not being comparable to WLTC class 3, I will feed the EGO vehicle into a WLTC Class 3 Speed Trace and then compare to the German WLTP benchmark.
