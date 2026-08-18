@@ -11,7 +11,10 @@ Pipeline:
 
 This stage does not yet solve junction temperature dynamically. It evaluates
 Rds(on) at a configurable reference junction temperature (default 25 C).
-The coupled thermal stage will replace that fixed-temperature assumption.
+For CAB525F12XM3, switching-energy temperature dependence is interpolated
+from the published 25/125/175 C datasheet points; current and voltage scaling
+remain first-order until the datasheet curves are digitized.
+The coupled thermal stage will replace the fixed-temperature assumption.
 """
 
 from dataclasses import dataclass
@@ -52,6 +55,10 @@ class InverterConfig:
 
     eon_reference_j: float
     eoff_reference_j: float
+    eon_125c_j: float
+    eoff_125c_j: float
+    eon_175c_j: float
+    eoff_175c_j: float
     switching_reference_current_a: float
     switching_reference_voltage_v: float
 
@@ -213,6 +220,30 @@ def load_inverter_config(
             0.000506,
             minimum=0.0,
         ),
+        eon_125c_j=_number(
+            mosfet,
+            "eon_125c_j",
+            mosfet.get("eon_reference_j", 0.000486),
+            minimum=0.0,
+        ),
+        eoff_125c_j=_number(
+            mosfet,
+            "eoff_125c_j",
+            mosfet.get("eoff_reference_j", 0.000506),
+            minimum=0.0,
+        ),
+        eon_175c_j=_number(
+            mosfet,
+            "eon_175c_j",
+            mosfet.get("eon_reference_j", 0.000486),
+            minimum=0.0,
+        ),
+        eoff_175c_j=_number(
+            mosfet,
+            "eoff_175c_j",
+            mosfet.get("eoff_reference_j", 0.000506),
+            minimum=0.0,
+        ),
         switching_reference_current_a=_number(
             mosfet,
             "switching_reference_current_a",
@@ -251,6 +282,99 @@ def rds_on_at_temperature(
         * (tj_k / t0_k)
         ** config.rds_on_temperature_exponent
     )
+
+
+
+
+def switching_energy_at_temperature(
+    config: InverterConfig,
+    junction_temperature_c: float,
+) -> tuple[float, float]:
+    """
+    Return (Eon, Eoff) at the datasheet reference current/voltage.
+
+    CAB525F12XM3 Rev. 3 publishes switching energy at 25, 125 and
+    175 degC for VDD=600 V and ID=450 A.  We linearly interpolate
+    between those measured datasheet points and clamp outside them.
+    """
+    tj = float(junction_temperature_c)
+
+    points = (
+        (25.0, config.eon_reference_j, config.eoff_reference_j),
+        (125.0, config.eon_125c_j, config.eoff_125c_j),
+        (175.0, config.eon_175c_j, config.eoff_175c_j),
+    )
+
+    if tj <= points[0][0]:
+        return points[0][1], points[0][2]
+    if tj >= points[-1][0]:
+        return points[-1][1], points[-1][2]
+
+    for (t0, eon0, eoff0), (t1, eon1, eoff1) in zip(points, points[1:]):
+        if t0 <= tj <= t1:
+            alpha = (tj - t0) / (t1 - t0)
+            return (
+                eon0 + alpha * (eon1 - eon0),
+                eoff0 + alpha * (eoff1 - eoff0),
+            )
+
+    raise RuntimeError("Failed to interpolate switching energy.")
+
+
+def switching_energy_scaled(
+    config: InverterConfig,
+    switching_current_a: float,
+    dc_bus_voltage_v: float,
+    junction_temperature_c: float,
+) -> tuple[float, float]:
+    """
+    First-order scaling away from the published reference point.
+
+    Temperature uses actual datasheet points. Current and voltage remain
+    linear scalings until the datasheet curves are digitized.
+    """
+    eon_ref, eoff_ref = switching_energy_at_temperature(
+        config,
+        junction_temperature_c,
+    )
+
+    current_scale = max(float(switching_current_a), 0.0) / max(
+        config.switching_reference_current_a,
+        1e-12,
+    )
+    voltage_scale = max(float(dc_bus_voltage_v), 0.0) / max(
+        config.switching_reference_voltage_v,
+        1e-12,
+    )
+
+    return (
+        eon_ref * current_scale * voltage_scale,
+        eoff_ref * current_scale * voltage_scale,
+    )
+
+
+def validate_datasheet_reference_point(
+    config: InverterConfig,
+) -> dict[str, float]:
+    """Return model values at the CAB525F12XM3 published reference point."""
+    r25 = rds_on_at_temperature(config, 25.0)
+    r175 = rds_on_at_temperature(config, 175.0)
+    eon25, eoff25 = switching_energy_at_temperature(config, 25.0)
+    eon125, eoff125 = switching_energy_at_temperature(config, 125.0)
+    eon175, eoff175 = switching_energy_at_temperature(config, 175.0)
+
+    return {
+        "rds_25c_ohm": r25,
+        "rds_175c_ohm": r175,
+        "eon_25c_j": eon25,
+        "eoff_25c_j": eoff25,
+        "eon_125c_j": eon125,
+        "eoff_125c_j": eoff125,
+        "eon_175c_j": eon175,
+        "eoff_175c_j": eoff175,
+        "switching_reference_current_a": config.switching_reference_current_a,
+        "switching_reference_voltage_v": config.switching_reference_voltage_v,
+    }
 
 
 def _phase_current_from_dc_power(
@@ -378,20 +502,29 @@ def analyze_inverter_profile(
             * 0.5
         )
 
-        current_scale = (
-            device_peak
-            / inverter_config.switching_reference_current_a
+        # For a sinusoidal phase current, the mean absolute instantaneous
+        # current is (2*sqrt(2)/pi)*I_rms.  This is a better representative
+        # switching current than applying the phase-current peak to every
+        # PWM event.
+        mean_abs_phase_current = (
+            2.0 * SQRT_2 / math.pi
+        ) * phase_rms
+
+        switching_current_per_position = (
+            mean_abs_phase_current
+            / inverter_config.parallel_devices_per_switch
         )
 
-        voltage_scale = (
-            inverter_config.dc_bus_voltage_v
-            / inverter_config.switching_reference_voltage_v
+        eon_event_j, eoff_event_j = switching_energy_scaled(
+            inverter_config,
+            switching_current_per_position,
+            inverter_config.dc_bus_voltage_v,
+            tj_c,
         )
 
         switching_energy_per_event = (
-            inverter_config.eon_reference_j
-            + inverter_config.eoff_reference_j
-        ) * current_scale * voltage_scale
+            eon_event_j + eoff_event_j
+        )
 
         switching_loss = (
             switching_energy_per_event

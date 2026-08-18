@@ -31,6 +31,10 @@ from drive_cycles.vehicle_config_calibration import (
     load_calibration_parameters,
     write_calibrated_yaml,
 )
+from drive_cycles.inverter_validation import (
+    run_inverter_mission_validation,
+    validate_cab525f12xm3_datasheet,
+)
 
 
 RAW_HEADER = ["time_s", "v_mps", "grade_deg"]
@@ -121,12 +125,7 @@ class ValidationLab(tk.Tk):
 
         self._build_vehicle_tab()
         self._build_wltc_tab()
-        self._build_placeholder(
-            self.inverter_tab,
-            "Inverter validation",
-            "Next stage: compare conduction and switching losses against "
-            "manufacturer datasheet operating points.",
-        )
+        self._build_inverter_tab()
         self._build_placeholder(
             self.thermal_tab,
             "Thermal validation",
@@ -863,6 +862,364 @@ class ValidationLab(tk.Tk):
                 f"WLTC validation complete: "
                 f"{result.simulated_wh_per_km:.2f} Wh/km "
                 f"({result.error_percent:+.2f} %)"
+            )
+        )
+
+    def _build_inverter_tab(self) -> None:
+        root = ttk.Frame(
+            self.inverter_tab,
+            padding=14,
+        )
+        root.pack(
+            fill="both",
+            expand=True,
+        )
+
+        ttk.Label(
+            root,
+            text="Wolfspeed CAB525F12XM3 inverter validation",
+            font=("TkDefaultFont", 13, "bold"),
+        ).pack(
+            anchor="w"
+        )
+
+        ttk.Label(
+            root,
+            text=(
+                "Stage 1 checks that the electrical model reproduces the "
+                "published CAB525F12XM3 reference points. Stage 2 runs the "
+                "same inverter model over the WLTC Class 3 mission profile."
+            ),
+            wraplength=1050,
+        ).pack(
+            anchor="w",
+            pady=(4, 12),
+        )
+
+        controls = ttk.Frame(
+            root
+        )
+        controls.pack(
+            fill="x",
+            pady=(0, 10),
+        )
+
+        ttk.Button(
+            controls,
+            text="1. Validate datasheet points",
+            command=self._run_inverter_datasheet_validation,
+        ).pack(
+            side="left",
+        )
+
+        ttk.Button(
+            controls,
+            text="2. Run WLTC inverter mission",
+            command=self._run_inverter_wltc_validation,
+        ).pack(
+            side="left",
+            padx=(8, 0),
+        )
+
+        self.inverter_status_var = tk.StringVar(
+            value=(
+                "Run the datasheet validation first."
+            )
+        )
+
+        ttk.Label(
+            controls,
+            textvariable=self.inverter_status_var,
+        ).pack(
+            side="right",
+        )
+
+        panes = ttk.Panedwindow(
+            root,
+            orient="vertical",
+        )
+        panes.pack(
+            fill="both",
+            expand=True,
+        )
+
+        reference_frame = ttk.LabelFrame(
+            panes,
+            text="Datasheet reference-point reproduction",
+            padding=6,
+        )
+        mission_frame = ttk.LabelFrame(
+            panes,
+            text="WLTC inverter mission result",
+            padding=6,
+        )
+
+        panes.add(
+            reference_frame,
+            weight=2,
+        )
+        panes.add(
+            mission_frame,
+            weight=2,
+        )
+
+        columns = (
+            "parameter",
+            "datasheet",
+            "model",
+            "error",
+            "status",
+        )
+
+        self.inverter_reference_tree = ttk.Treeview(
+            reference_frame,
+            columns=columns,
+            show="headings",
+            height=10,
+        )
+
+        headings = {
+            "parameter": "Parameter",
+            "datasheet": "Datasheet",
+            "model": "Model",
+            "error": "Error %",
+            "status": "Status",
+        }
+
+        widths = {
+            "parameter": 240,
+            "datasheet": 145,
+            "model": 145,
+            "error": 100,
+            "status": 90,
+        }
+
+        for column in columns:
+            self.inverter_reference_tree.heading(
+                column,
+                text=headings[column],
+            )
+            self.inverter_reference_tree.column(
+                column,
+                width=widths[column],
+                anchor=(
+                    "w"
+                    if column == "parameter"
+                    else "center"
+                ),
+            )
+
+        self.inverter_reference_tree.pack(
+            fill="both",
+            expand=True,
+        )
+
+        self.inverter_mission_text = tk.Text(
+            mission_frame,
+            wrap="word",
+            state="disabled",
+            font=("Consolas", 10),
+            height=12,
+        )
+        self.inverter_mission_text.pack(
+            fill="both",
+            expand=True,
+        )
+
+    @staticmethod
+    def _format_inverter_reference_value(
+        value: float,
+        unit: str,
+    ) -> str:
+        if unit == "ohm":
+            return (
+                f"{value * 1000.0:.4f} mOhm"
+            )
+        if unit == "J":
+            return (
+                f"{value * 1000.0:.3f} mJ"
+            )
+        if unit == "A":
+            return f"{value:.1f} A"
+        if unit == "V":
+            return f"{value:.1f} V"
+        return f"{value:.6g} {unit}"
+
+    def _run_inverter_datasheet_validation(
+        self,
+    ) -> None:
+        try:
+            result = validate_cab525f12xm3_datasheet(
+                self.vehicle_config
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Inverter validation failed",
+                str(exc),
+            )
+            self.inverter_status_var.set(
+                "Datasheet validation failed."
+            )
+            return
+
+        for item in (
+            self.inverter_reference_tree.get_children()
+        ):
+            self.inverter_reference_tree.delete(
+                item
+            )
+
+        for check in result.checks:
+            self.inverter_reference_tree.insert(
+                "",
+                "end",
+                values=(
+                    check.name,
+                    self._format_inverter_reference_value(
+                        check.datasheet_value,
+                        check.unit,
+                    ),
+                    self._format_inverter_reference_value(
+                        check.model_value,
+                        check.unit,
+                    ),
+                    f"{check.error_percent:+.3f}",
+                    "PASS" if check.passed else "FAIL",
+                ),
+            )
+
+        self.inverter_status_var.set(
+            (
+                f"{result.device_name}: "
+                + (
+                    "DATASHEET PASS"
+                    if result.overall_pass
+                    else "DATASHEET FAIL"
+                )
+            )
+        )
+
+    def _run_inverter_wltc_validation(
+        self,
+    ) -> None:
+        trace_path = Path(
+            self.wltc_trace_var.get()
+        )
+
+        if not trace_path.is_file():
+            messagebox.showinfo(
+                "Inverter WLTC validation",
+                (
+                    "Prepare the WLTC Class 3 trace in tab 2 "
+                    "before running the inverter mission."
+                ),
+            )
+            return
+
+        self.inverter_status_var.set(
+            "Running WLTC inverter mission..."
+        )
+        self.update_idletasks()
+
+        try:
+            result = run_inverter_mission_validation(
+                trace_path,
+                self.vehicle_config,
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Inverter WLTC validation failed",
+                str(exc),
+            )
+            self.inverter_status_var.set(
+                "WLTC inverter mission failed."
+            )
+            return
+
+        lines = [
+            "WLTC CLASS 3 INVERTER MISSION VALIDATION",
+            "=" * 66,
+            "",
+            "REFERENCE DEVICE",
+            "  Wolfspeed CAB525F12XM3",
+            "  1200 V SiC half-bridge power module",
+            "",
+            "MISSION ELECTRICAL RESULTS",
+            (
+                f"  Peak phase current:      "
+                f"{result.peak_phase_current_a:.2f} A"
+            ),
+            (
+                f"  Peak device current:     "
+                f"{result.peak_device_current_a:.2f} A"
+            ),
+            (
+                f"  Peak inverter loss:      "
+                f"{result.peak_total_loss_w:.2f} W"
+            ),
+            (
+                f"  Conduction loss energy:  "
+                f"{result.conduction_energy_wh:.3f} Wh"
+            ),
+            (
+                f"  Switching loss energy:   "
+                f"{result.switching_energy_wh:.3f} Wh"
+            ),
+            (
+                f"  Total inverter loss:     "
+                f"{result.loss_energy_wh:.3f} Wh"
+            ),
+            (
+                f"  Switching share:         "
+                f"{result.switching_fraction_percent:.2f} %"
+            ),
+            (
+                f"  Peak unserved power:     "
+                f"{result.peak_unserved_power_w:.2f} W"
+            ),
+            (
+                "  Current-limit status:    "
+                + (
+                    "PASS"
+                    if result.served_without_current_limit
+                    else "REVIEW - current limit reached"
+                )
+            ),
+            "",
+            "MODEL STATUS",
+            (
+                "  RDS(on) and switching-energy reference values are "
+                "datasheet anchored."
+            ),
+            (
+                "  Current/voltage scaling away from the published "
+                "reference point remains a first-order approximation."
+            ),
+            (
+                "  Thermal Foster parameters are validated separately "
+                "in the next stage."
+            ),
+        ]
+
+        self.inverter_mission_text.configure(
+            state="normal"
+        )
+        self.inverter_mission_text.delete(
+            "1.0",
+            tk.END,
+        )
+        self.inverter_mission_text.insert(
+            "1.0",
+            "\n".join(lines),
+        )
+        self.inverter_mission_text.configure(
+            state="disabled"
+        )
+
+        self.inverter_status_var.set(
+            (
+                "WLTC inverter mission complete: "
+                f"{result.loss_energy_wh:.2f} Wh loss"
             )
         )
 

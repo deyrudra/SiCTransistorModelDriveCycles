@@ -60,6 +60,10 @@ mosfet:
     model.
   eon_reference_j: 0.0254
   eoff_reference_j: 0.0075
+  eon_125c_j: 0.024
+  eoff_125c_j: 0.0081
+  eon_175c_j: 0.0244
+  eoff_175c_j: 0.0084
   switching_reference_current_a: 450
   switching_reference_voltage_v: 600
   switching_reference_tj_c: 25.0
@@ -71,8 +75,8 @@ mosfet:
   tj_max_c: 175.0
   electrical_parameter_source: Wolfspeed CAB525F12XM3 datasheet, Rev. 3, September
     2024
-  electrical_model_status: datasheet-anchored reference-point model; switching curves
-    not yet digitized/interpolated
+  electrical_model_status: datasheet-anchored temperature-interpolated switching model;
+    current and voltage switching curves not yet digitized
   thermal:
     rth_jc_c_per_w: 0.42
     rth_case_to_coolant_c_per_w: 0.05
