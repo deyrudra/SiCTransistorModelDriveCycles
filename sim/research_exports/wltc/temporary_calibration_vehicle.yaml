@@ -1,0 +1,73 @@
+vehicle:
+  name: tesla_model3_premium_long_range_rwd_de_wltp
+  mass_kg: 1822
+  frontal_area_m2: 2.22
+  drag_coefficient: 0.23
+  rolling_resistance_coefficient: 0.01
+powertrain:
+  drivetrain_efficiency: 0.9
+  regenerative_efficiency: 0.6847
+  max_propulsion_power_w: 235000
+  max_regen_power_w: 90000
+  regen_cutoff_speed_mps: 1.5
+  regen_full_speed_mps: 5.0
+  max_acceleration_mps2: 1.8
+  comfortable_braking_mps2: 2.5
+  emergency_braking_mps2: 6.0
+auxiliary:
+  base_power_w: 500.0
+  hvac_power_w: 1500
+  hvac_enabled: false
+driver:
+  safe_distance_m: 5.0
+  time_headway_s: 1.5
+validation:
+  benchmark_name: Tesla Model 3 Premium Long Range Rear-Wheel Drive
+  market: Germany
+  certification_cycle: WLTP_combined
+  official_consumption_kwh_per_100km: 13.6
+  official_consumption_wh_per_km: 136.0
+  official_mass_kg: 1822
+  official_rear_motor_power_kw: 235
+  benchmark_purpose: vehicle_layer_validation
+inverter:
+  dc_bus_voltage_v: 345.5
+  switching_frequency_hz: 10000
+  max_phase_current_a_peak: 700
+  parallel_devices_per_switch: 4
+  modulation_factor: 0.9
+mosfet:
+  rds_on_ohm_at_25c: 0.02
+  rds_on_temperature_exponent: 1.273
+  eon_reference_j: 0.000486
+  eoff_reference_j: 0.000506
+  switching_reference_current_a: 50
+  switching_reference_voltage_v: 520
+  tj_reference_c: 25.0
+  tj_max_c: 200.0
+  thermal:
+    rth_jc_c_per_w: 0.42
+    rth_case_to_coolant_c_per_w: 0.05
+    foster_rc_pairs:
+    - rth_c_per_w: 0.0216
+      tau_s: 7.7e-05
+    - rth_c_per_w: 0.0703
+      tau_s: 0.001554
+    - rth_c_per_w: 0.1668
+      tau_s: 0.016634
+    - rth_c_per_w: 0.1613
+      tau_s: 0.142761
+    max_iterations: 30
+    convergence_tolerance_c: 0.01
+    relaxation: 0.5
+cooling:
+  coolant_inlet_temp_c: 65.0
+reliability:
+  model: coffin_manson_arrhenius
+  calibrated: false
+  calibration_source: null
+  delta_t_reference_c: 40.0
+  mean_tj_reference_c: 100.0
+  coffin_manson_exponent: 5.0
+  activation_energy_ev: 0.7
+  minimum_delta_t_c: 0.01
