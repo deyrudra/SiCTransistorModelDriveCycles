@@ -34,45 +34,17 @@ inverter:
   dc_bus_voltage_v: 345.5
   switching_frequency_hz: 10000
   max_phase_current_a_peak: 700
-  parallel_devices_per_switch: 1
+  parallel_devices_per_switch: 4
   modulation_factor: 0.9
-  reference_power_module: Wolfspeed CAB525F12XM3
-  module_configuration: 1200 V SiC half-bridge module; one module per inverter phase
-    leg
 mosfet:
-  manufacturer: Wolfspeed
-  part_number: CAB525F12XM3
-  technology: Gen 3 SiC MOSFET half-bridge power module
-  datasheet_revision: Rev. 3, September 2024
-  blocking_voltage_v: 1200
-  implementable_inverter_current_a_rms: 525
-  implementable_current_reference_fluid_temp_c: 60.0
-  implementable_current_reference_switching_frequency_hz: 5000
-  continuous_drain_current_a: 450
-  continuous_current_reference_fluid_temp_c: 25.0
-  recommended_gate_voltage_on_v: 15.0
-  operational_gate_voltage_off_v: -4.0
-  rds_on_ohm_at_25c: 0.0026
-  rds_on_ohm_at_175c: 0.0047
-  rds_on_temperature_exponent: 1.452775
-  rds_temperature_model_note: Exponent derived to reproduce datasheet typical RDS(on)
-    2.6 mOhm at 25C and 4.7 mOhm at 175C with the existing Kelvin-ratio power-law
-    model.
-  eon_reference_j: 0.0254
-  eoff_reference_j: 0.0075
-  switching_reference_current_a: 450
-  switching_reference_voltage_v: 600
-  switching_reference_tj_c: 25.0
-  switching_reference_gate_on_resistance_ohm: 4.0
-  switching_reference_gate_off_resistance_ohm: 0.0
-  switching_reference_gate_voltage_on_v: 15.0
-  switching_reference_gate_voltage_off_v: -4.0
+  rds_on_ohm_at_25c: 0.02
+  rds_on_temperature_exponent: 1.273
+  eon_reference_j: 0.000486
+  eoff_reference_j: 0.000506
+  switching_reference_current_a: 50
+  switching_reference_voltage_v: 520
   tj_reference_c: 25.0
-  tj_max_c: 175.0
-  electrical_parameter_source: Wolfspeed CAB525F12XM3 datasheet, Rev. 3, September
-    2024
-  electrical_model_status: datasheet-anchored reference-point model; switching curves
-    not yet digitized/interpolated
+  tj_max_c: 200.0
   thermal:
     rth_jc_c_per_w: 0.42
     rth_case_to_coolant_c_per_w: 0.05
@@ -88,8 +60,6 @@ mosfet:
     max_iterations: 30
     convergence_tolerance_c: 0.01
     relaxation: 0.5
-    model_status: legacy placeholder Foster network; NOT yet replaced by CAB525F12XM3
-      transient thermal impedance data
 cooling:
   coolant_inlet_temp_c: 65.0
 reliability:
