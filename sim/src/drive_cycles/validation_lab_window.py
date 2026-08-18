@@ -39,6 +39,10 @@ from drive_cycles.thermal_validation import (
     run_thermal_mission_validation,
     validate_cab525f12xm3_thermal,
 )
+from drive_cycles.reliability_validation import (
+    run_reliability_mission_validation,
+    validate_reliability_model,
+)
 
 
 RAW_HEADER = ["time_s", "v_mps", "grade_deg"]
@@ -131,12 +135,7 @@ class ValidationLab(tk.Tk):
         self._build_wltc_tab()
         self._build_inverter_tab()
         self._build_thermal_tab()
-        self._build_placeholder(
-            self.reliability_tab,
-            "Reliability validation",
-            "Later stage: compare rainflow / damage-model behaviour against "
-            "published power-cycling lifetime data.",
-        )
+        self._build_reliability_tab()
 
     def _build_wltc_tab(self) -> None:
         root = ttk.Frame(
@@ -1561,6 +1560,355 @@ class ValidationLab(tk.Tk):
             (
                 "WLTC thermal mission complete: "
                 f"peak Tj {result.peak_junction_temperature_c:.2f} C"
+            )
+        )
+
+    def _build_reliability_tab(self) -> None:
+        root = ttk.Frame(
+            self.reliability_tab,
+            padding=14,
+        )
+        root.pack(
+            fill="both",
+            expand=True,
+        )
+
+        ttk.Label(
+            root,
+            text="CAB525F12XM3 mission-profile reliability",
+            font=("TkDefaultFont", 13, "bold"),
+        ).pack(anchor="w")
+
+        ttk.Label(
+            root,
+            text=(
+                "This stage validates the damage-model behaviour and applies "
+                "rainflow + Miner accumulation to the electro-thermal mission. "
+                "Because CAB525F12XM3 cycles-to-failure coefficients are not "
+                "publicly available, results remain relative durability "
+                "indices rather than absolute lifetime."
+            ),
+            wraplength=1080,
+        ).pack(
+            anchor="w",
+            pady=(4, 12),
+        )
+
+        controls = ttk.Frame(root)
+        controls.pack(
+            fill="x",
+            pady=(0, 10),
+        )
+
+        ttk.Button(
+            controls,
+            text="1. Validate damage model",
+            command=self._run_reliability_model_validation,
+        ).pack(side="left")
+
+        ttk.Button(
+            controls,
+            text="2. Run WLTC reliability mission",
+            command=self._run_reliability_wltc_validation,
+        ).pack(
+            side="left",
+            padx=(8, 0),
+        )
+
+        self.reliability_status_var = tk.StringVar(
+            value="Run damage-model validation first."
+        )
+
+        ttk.Label(
+            controls,
+            textvariable=self.reliability_status_var,
+        ).pack(side="right")
+
+        panes = ttk.Panedwindow(
+            root,
+            orient="vertical",
+        )
+        panes.pack(
+            fill="both",
+            expand=True,
+        )
+
+        checks_frame = ttk.LabelFrame(
+            panes,
+            text="Reliability model qualification",
+            padding=6,
+        )
+        mission_frame = ttk.LabelFrame(
+            panes,
+            text="WLTC reliability mission result",
+            padding=6,
+        )
+
+        panes.add(
+            checks_frame,
+            weight=2,
+        )
+        panes.add(
+            mission_frame,
+            weight=2,
+        )
+
+        columns = (
+            "check",
+            "status",
+            "detail",
+        )
+
+        self.reliability_checks_tree = ttk.Treeview(
+            checks_frame,
+            columns=columns,
+            show="headings",
+            height=7,
+        )
+
+        self.reliability_checks_tree.heading(
+            "check",
+            text="Check",
+        )
+        self.reliability_checks_tree.heading(
+            "status",
+            text="Status",
+        )
+        self.reliability_checks_tree.heading(
+            "detail",
+            text="Detail",
+        )
+
+        self.reliability_checks_tree.column(
+            "check",
+            width=320,
+            anchor="w",
+        )
+        self.reliability_checks_tree.column(
+            "status",
+            width=90,
+            anchor="center",
+        )
+        self.reliability_checks_tree.column(
+            "detail",
+            width=620,
+            anchor="w",
+        )
+
+        self.reliability_checks_tree.pack(
+            fill="both",
+            expand=True,
+        )
+
+        self.reliability_mission_text = tk.Text(
+            mission_frame,
+            wrap="word",
+            state="disabled",
+            font=("Consolas", 10),
+            height=14,
+        )
+        self.reliability_mission_text.pack(
+            fill="both",
+            expand=True,
+        )
+
+    def _run_reliability_model_validation(
+        self,
+    ) -> None:
+        try:
+            result = validate_reliability_model(
+                self.vehicle_config
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Reliability validation failed",
+                str(exc),
+            )
+            self.reliability_status_var.set(
+                "Reliability validation failed."
+            )
+            return
+
+        for item in self.reliability_checks_tree.get_children():
+            self.reliability_checks_tree.delete(
+                item
+            )
+
+        for check in result.checks:
+            self.reliability_checks_tree.insert(
+                "",
+                "end",
+                values=(
+                    check.name,
+                    "PASS" if check.passed else "FAIL",
+                    check.detail,
+                ),
+            )
+
+        qualification = (
+            "RELATIVE MODEL PASS"
+            if result.overall_pass
+            else "MODEL REVIEW"
+        )
+
+        self.reliability_status_var.set(
+            qualification
+            + " | absolute CAB525 lifetime: NOT CALIBRATED"
+        )
+
+    def _run_reliability_wltc_validation(
+        self,
+    ) -> None:
+        trace_path = Path(
+            self.wltc_trace_var.get()
+        )
+
+        if not trace_path.is_file():
+            messagebox.showinfo(
+                "Reliability WLTC validation",
+                (
+                    "Prepare the WLTC Class 3 trace in tab 2 "
+                    "before running the reliability mission."
+                ),
+            )
+            return
+
+        self.reliability_status_var.set(
+            "Running WLTC rainflow and relative-damage analysis..."
+        )
+        self.update_idletasks()
+
+        try:
+            result = run_reliability_mission_validation(
+                trace_path,
+                self.vehicle_config,
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Reliability WLTC validation failed",
+                str(exc),
+            )
+            self.reliability_status_var.set(
+                "WLTC reliability mission failed."
+            )
+            return
+
+        total_envelope_cycles = (
+            result.cycles_inside_manufacturer_pc_temperature_envelope
+            + result.cycles_outside_manufacturer_pc_temperature_envelope
+        )
+
+        inside_percent = (
+            100.0
+            * result.cycles_inside_manufacturer_pc_temperature_envelope
+            / total_envelope_cycles
+            if total_envelope_cycles > 0.0
+            else 0.0
+        )
+
+        lines = [
+            "WLTC CLASS 3 RELIABILITY MISSION ANALYSIS",
+            "=" * 68,
+            "",
+            "METHOD",
+            "  Thermal history:        CAB525F12XM3 electro-thermal model",
+            "  Cycle extraction:       rainflow counting",
+            "  Damage accumulation:    Palmgren-Miner linear accumulation",
+            "  Stress variables:       Delta Tj, Tj,max, excursion duration",
+            "",
+            "MISSION DAMAGE",
+            (
+                f"  Relative damage index:  "
+                f"{result.total_relative_damage:.6e}"
+            ),
+            (
+                f"  Equivalent cycles:      "
+                f"{result.equivalent_full_cycles:.2f}"
+            ),
+            (
+                f"  Max cycle contribution: "
+                f"{result.maximum_damage_contribution:.6e}"
+            ),
+            (
+                f"  Most damaging cycle:    "
+                f"{result.most_damaging_cycle_index}"
+            ),
+            "",
+            "DAMAGE-WEIGHTED STRESS",
+            (
+                f"  Delta Tj:               "
+                f"{result.damage_weighted_delta_tj_c:.2f} C"
+            ),
+            (
+                f"  Tj,max:                 "
+                f"{result.damage_weighted_tjmax_c:.2f} C"
+            ),
+            (
+                f"  Excursion duration:     "
+                f"{result.damage_weighted_duration_s:.2f} s"
+            ),
+            "",
+            "WOLFSPEED POWER-CYCLING CONTEXT",
+            (
+                f"  Inside published PC temperature envelope: "
+                f"{result.cycles_inside_manufacturer_pc_temperature_envelope:.2f} "
+                f"cycles ({inside_percent:.1f} %)"
+            ),
+            (
+                f"  Outside published PC temperature envelope: "
+                f"{result.cycles_outside_manufacturer_pc_temperature_envelope:.2f}"
+            ),
+            (
+                f"  PCsec-like durations:   "
+                f"{result.pcsec_equivalent_cycles:.2f}"
+            ),
+            (
+                f"  Transition durations:   "
+                f"{result.transition_duration_equivalent_cycles:.2f}"
+            ),
+            (
+                f"  PCmin-like durations:   "
+                f"{result.pcmin_equivalent_cycles:.2f}"
+            ),
+            "",
+            "QUALIFICATION",
+            "  Route-to-route relative ranking: ENABLED",
+            "  CAB525 absolute cycles-to-failure: NOT CALIBRATED",
+            "  Years of life / remaining useful life: NOT CLAIMED",
+            "",
+            (
+                "  The manufacturer publishes the power-cycling methodology "
+                "and typical stress"
+            ),
+            (
+                "  ranges, but not CAB525F12XM3-specific life-model "
+                "coefficients. Relative"
+            ),
+            (
+                "  damage is therefore the scientifically defensible output "
+                "for this model."
+            ),
+        ]
+
+        self.reliability_mission_text.configure(
+            state="normal"
+        )
+        self.reliability_mission_text.delete(
+            "1.0",
+            tk.END,
+        )
+        self.reliability_mission_text.insert(
+            "1.0",
+            "\n".join(lines),
+        )
+        self.reliability_mission_text.configure(
+            state="disabled"
+        )
+
+        self.reliability_status_var.set(
+            (
+                "WLTC reliability complete: relative damage "
+                f"{result.total_relative_damage:.3e}"
             )
         )
 

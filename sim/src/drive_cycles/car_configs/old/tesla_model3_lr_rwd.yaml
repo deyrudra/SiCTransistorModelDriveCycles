@@ -60,7 +60,7 @@ mosfet:
     model.
   eon_reference_j: 0.0254
   eoff_reference_j: 0.0075
-  eon_125c_j: 0.0240
+  eon_125c_j: 0.024
   eoff_125c_j: 0.0081
   eon_175c_j: 0.0244
   eoff_175c_j: 0.0084
@@ -75,26 +75,31 @@ mosfet:
   tj_max_c: 175.0
   electrical_parameter_source: Wolfspeed CAB525F12XM3 datasheet, Rev. 3, September
     2024
-  electrical_model_status: datasheet-anchored temperature-interpolated switching model; current and voltage switching curves not yet digitized
+  electrical_model_status: datasheet-anchored temperature-interpolated switching model;
+    current and voltage switching curves not yet digitized
   thermal:
-    rth_jc_c_per_w: 0.42
-    rth_case_to_coolant_c_per_w: 0.05
+    reference_device: Wolfspeed CAB525F12XM3
+    thermal_path: junction_to_fluid
+    flow_rate_lpm: 4.0
+    rth_junction_to_fluid_c_per_w: 0.145
     foster_rc_pairs:
-    - rth_c_per_w: 0.0216
-      tau_s: 7.7e-05
-    - rth_c_per_w: 0.0703
-      tau_s: 0.001554
-    - rth_c_per_w: 0.1668
-      tau_s: 0.016634
-    - rth_c_per_w: 0.1613
-      tau_s: 0.142761
+    - rth_c_per_w: 0.0013993582
+      tau_s: 2.680279e-06
+    - rth_c_per_w: 0.0183206305
+      tau_s: 0.0003154884
+    - rth_c_per_w: 0.0887845942
+      tau_s: 0.014347792
+    - rth_c_per_w: 0.0364954171
+      tau_s: 0.50308168
     max_iterations: 30
     convergence_tolerance_c: 0.01
     relaxation: 0.5
-    model_status: legacy placeholder Foster network; NOT yet replaced by CAB525F12XM3
-      transient thermal impedance data
+    model_status: Foster fit to CAB525F12XM3 Rev.3 Figure 17; steady Rth,J-F anchored
+      to 0.145 C/W at 4 LPM
+    fit_note: Transient points are approximate graph-read values; steady-state Rth,J-F
+      is the hard datasheet scalar.
 cooling:
-  coolant_inlet_temp_c: 65.0
+  coolant_inlet_temp_c: 60.0
 reliability:
   model: coffin_manson_arrhenius
   calibrated: false

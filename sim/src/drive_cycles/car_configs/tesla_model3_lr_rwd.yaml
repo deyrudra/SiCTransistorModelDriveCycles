@@ -101,11 +101,23 @@ mosfet:
 cooling:
   coolant_inlet_temp_c: 60.0
 reliability:
-  model: coffin_manson_arrhenius
+  model: wolfspeed_structured_relative_damage
   calibrated: false
-  calibration_source: null
-  delta_t_reference_c: 40.0
-  mean_tj_reference_c: 100.0
-  coffin_manson_exponent: 5.0
+  calibration_source: Wolfspeed 2025 SiC Power Module Reliability whitepaper (methodology
+    only; no CAB525F12XM3 lifetime coefficients published)
+  delta_t_reference_c: 75.0
+  tj_max_reference_c: 125.0
+  duration_reference_s: 5.0
+  delta_t_exponent: 5.0
   activation_energy_ev: 0.7
+  duration_exponent: 0.3
   minimum_delta_t_c: 0.01
+  manufacturer_pc_delta_t_min_c: 75.0
+  manufacturer_pc_delta_t_max_c: 125.0
+  manufacturer_pc_tjmax_min_c: 125.0
+  manufacturer_pc_tjmax_max_c: 175.0
+  pcsec_duration_max_s: 5.0
+  pcmin_duration_min_s: 15.0
+  model_status: relative route-ranking model; stress structure follows Wolfspeed published
+    methodology; exponents are engineering assumptions and are not CAB525F12XM3 cycles-to-failure
+    coefficients
