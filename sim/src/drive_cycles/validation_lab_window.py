@@ -35,6 +35,10 @@ from drive_cycles.inverter_validation import (
     run_inverter_mission_validation,
     validate_cab525f12xm3_datasheet,
 )
+from drive_cycles.thermal_validation import (
+    run_thermal_mission_validation,
+    validate_cab525f12xm3_thermal,
+)
 
 
 RAW_HEADER = ["time_s", "v_mps", "grade_deg"]
@@ -126,12 +130,7 @@ class ValidationLab(tk.Tk):
         self._build_vehicle_tab()
         self._build_wltc_tab()
         self._build_inverter_tab()
-        self._build_placeholder(
-            self.thermal_tab,
-            "Thermal validation",
-            "Next stage: compare the Foster RC response against the selected "
-            "SiC device transient Zth(j-c) curve.",
-        )
+        self._build_thermal_tab()
         self._build_placeholder(
             self.reliability_tab,
             "Reliability validation",
@@ -1220,6 +1219,348 @@ class ValidationLab(tk.Tk):
             (
                 "WLTC inverter mission complete: "
                 f"{result.loss_energy_wh:.2f} Wh loss"
+            )
+        )
+
+    def _build_thermal_tab(self) -> None:
+        root = ttk.Frame(
+            self.thermal_tab,
+            padding=14,
+        )
+        root.pack(
+            fill="both",
+            expand=True,
+        )
+
+        ttk.Label(
+            root,
+            text="Wolfspeed CAB525F12XM3 thermal validation",
+            font=("TkDefaultFont", 13, "bold"),
+        ).pack(anchor="w")
+
+        ttk.Label(
+            root,
+            text=(
+                "The Foster network represents the complete junction-to-fluid "
+                "thermal path. The hard steady-state anchor is Rth,J-F = "
+                "0.145 C/W at 4 L/min; transient points are approximate "
+                "readings from datasheet Figure 17."
+            ),
+            wraplength=1050,
+        ).pack(
+            anchor="w",
+            pady=(4, 12),
+        )
+
+        controls = ttk.Frame(root)
+        controls.pack(
+            fill="x",
+            pady=(0, 10),
+        )
+
+        ttk.Button(
+            controls,
+            text="1. Validate thermal impedance",
+            command=self._run_thermal_datasheet_validation,
+        ).pack(side="left")
+
+        ttk.Button(
+            controls,
+            text="2. Run WLTC thermal mission",
+            command=self._run_thermal_wltc_validation,
+        ).pack(
+            side="left",
+            padx=(8, 0),
+        )
+
+        self.thermal_status_var = tk.StringVar(
+            value="Run thermal-impedance validation first."
+        )
+
+        ttk.Label(
+            controls,
+            textvariable=self.thermal_status_var,
+        ).pack(side="right")
+
+        panes = ttk.Panedwindow(
+            root,
+            orient="vertical",
+        )
+        panes.pack(
+            fill="both",
+            expand=True,
+        )
+
+        zth_frame = ttk.LabelFrame(
+            panes,
+            text="CAB525F12XM3 Zth,J-F reproduction",
+            padding=6,
+        )
+        mission_frame = ttk.LabelFrame(
+            panes,
+            text="WLTC thermal mission result",
+            padding=6,
+        )
+
+        panes.add(
+            zth_frame,
+            weight=2,
+        )
+        panes.add(
+            mission_frame,
+            weight=2,
+        )
+
+        columns = (
+            "time",
+            "datasheet",
+            "model",
+            "error",
+            "status",
+        )
+
+        self.thermal_zth_tree = ttk.Treeview(
+            zth_frame,
+            columns=columns,
+            show="headings",
+            height=10,
+        )
+
+        headings = {
+            "time": "Pulse time",
+            "datasheet": "Figure 17 / Datasheet",
+            "model": "Foster model",
+            "error": "Error %",
+            "status": "Status",
+        }
+
+        for column in columns:
+            self.thermal_zth_tree.heading(
+                column,
+                text=headings[column],
+            )
+            self.thermal_zth_tree.column(
+                column,
+                width=(
+                    180
+                    if column in (
+                        "datasheet",
+                        "model",
+                    )
+                    else 120
+                ),
+                anchor="center",
+            )
+
+        self.thermal_zth_tree.pack(
+            fill="both",
+            expand=True,
+        )
+
+        self.thermal_mission_text = tk.Text(
+            mission_frame,
+            wrap="word",
+            state="disabled",
+            font=("Consolas", 10),
+            height=12,
+        )
+        self.thermal_mission_text.pack(
+            fill="both",
+            expand=True,
+        )
+
+    def _run_thermal_datasheet_validation(
+        self,
+    ) -> None:
+        try:
+            result = validate_cab525f12xm3_thermal(
+                self.vehicle_config
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Thermal validation failed",
+                str(exc),
+            )
+            self.thermal_status_var.set(
+                "Thermal validation failed."
+            )
+            return
+
+        for item in self.thermal_zth_tree.get_children():
+            self.thermal_zth_tree.delete(item)
+
+        self.thermal_zth_tree.insert(
+            "",
+            "end",
+            values=(
+                "steady state",
+                (
+                    f"{result.datasheet_steady_rth_c_per_w:.6f} C/W"
+                ),
+                (
+                    f"{result.model_steady_rth_c_per_w:.6f} C/W"
+                ),
+                f"{result.steady_error_percent:+.2f}",
+                "PASS" if result.steady_pass else "FAIL",
+            ),
+        )
+
+        for check in result.transient_checks:
+            self.thermal_zth_tree.insert(
+                "",
+                "end",
+                values=(
+                    f"{check.time_s:.6g} s",
+                    f"{check.datasheet_zth_c_per_w:.6f} C/W",
+                    f"{check.model_zth_c_per_w:.6f} C/W",
+                    f"{check.error_percent:+.2f}",
+                    "PASS" if check.passed else "FAIL",
+                ),
+            )
+
+        self.thermal_status_var.set(
+            (
+                f"{result.device_name}: "
+                + (
+                    "THERMAL IMPEDANCE PASS"
+                    if result.overall_pass
+                    else "THERMAL IMPEDANCE REVIEW"
+                )
+            )
+        )
+
+    def _run_thermal_wltc_validation(
+        self,
+    ) -> None:
+        trace_path = Path(
+            self.wltc_trace_var.get()
+        )
+
+        if not trace_path.is_file():
+            messagebox.showinfo(
+                "Thermal WLTC validation",
+                (
+                    "Prepare the WLTC Class 3 trace in tab 2 "
+                    "before running the thermal mission."
+                ),
+            )
+            return
+
+        self.thermal_status_var.set(
+            "Running WLTC electro-thermal mission..."
+        )
+        self.update_idletasks()
+
+        try:
+            result = run_thermal_mission_validation(
+                trace_path,
+                self.vehicle_config,
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Thermal WLTC validation failed",
+                str(exc),
+            )
+            self.thermal_status_var.set(
+                "WLTC thermal mission failed."
+            )
+            return
+
+        lines = [
+            "WLTC CLASS 3 THERMAL MISSION VALIDATION",
+            "=" * 66,
+            "",
+            "THERMAL BOUNDARY",
+            "  Device:                   Wolfspeed CAB525F12XM3",
+            (
+                f"  Fluid temperature:       "
+                f"{result.fluid_temperature_c:.2f} C"
+            ),
+            "  Flow-rate reference:      4.0 L/min per module",
+            "  Datasheet Rth,J-F:         0.145 C/W",
+            "",
+            "MISSION RESULTS",
+            (
+                f"  Peak phase current:       "
+                f"{result.peak_phase_current_a:.2f} A"
+            ),
+            (
+                f"  Peak aggregate loss:      "
+                f"{result.peak_aggregate_loss_w:.2f} W"
+            ),
+            (
+                f"  Peak loss per position:   "
+                f"{result.peak_device_loss_w:.2f} W"
+            ),
+            (
+                f"  Peak junction temp:       "
+                f"{result.peak_junction_temperature_c:.2f} C"
+            ),
+            (
+                f"  Peak Tj rise over fluid:  "
+                f"{result.peak_delta_tj_c:.2f} C"
+            ),
+            (
+                f"  Total inverter loss:      "
+                f"{result.total_loss_energy_wh:.3f} Wh"
+            ),
+            (
+                f"  Non-converged samples:    "
+                f"{result.nonconverged_samples}"
+            ),
+            (
+                f"  Over-temperature samples: "
+                f"{result.overtemperature_samples}"
+            ),
+            "",
+            "ASSESSMENT",
+            (
+                "  Solver convergence:       "
+                + (
+                    "PASS"
+                    if result.solver_pass
+                    else "FAIL"
+                )
+            ),
+            (
+                "  Tj <= 175 C:              "
+                + (
+                    "PASS"
+                    if result.temperature_pass
+                    else "FAIL"
+                )
+            ),
+            "",
+            "MODEL STATUS",
+            (
+                "  Steady-state junction-to-fluid resistance is directly "
+                "anchored to the datasheet."
+            ),
+            (
+                "  The transient Foster network is a fitted representation "
+                "of Figure 17, not a manufacturer-supplied RC table."
+            ),
+        ]
+
+        self.thermal_mission_text.configure(
+            state="normal"
+        )
+        self.thermal_mission_text.delete(
+            "1.0",
+            tk.END,
+        )
+        self.thermal_mission_text.insert(
+            "1.0",
+            "\n".join(lines),
+        )
+        self.thermal_mission_text.configure(
+            state="disabled"
+        )
+
+        self.thermal_status_var.set(
+            (
+                "WLTC thermal mission complete: "
+                f"peak Tj {result.peak_junction_temperature_c:.2f} C"
             )
         )
 
