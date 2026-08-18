@@ -5,8 +5,8 @@ vehicle:
   drag_coefficient: 0.23
   rolling_resistance_coefficient: 0.01
 powertrain:
-  drivetrain_efficiency: 0.9
-  regenerative_efficiency: 0.6847
+  drivetrain_efficiency: 0.92
+  regenerative_efficiency: 0.8
   max_propulsion_power_w: 235000
   max_regen_power_w: 90000
   regen_cutoff_speed_mps: 1.5
@@ -15,7 +15,7 @@ powertrain:
   comfortable_braking_mps2: 2.5
   emergency_braking_mps2: 6.0
 auxiliary:
-  base_power_w: 500.0
+  base_power_w: 300.0
   hvac_power_w: 1500
   hvac_enabled: false
 driver:

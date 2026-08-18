@@ -25,6 +25,12 @@ from drive_cycles.wltc_class3_validation import (
     run_wltc_validation,
     summarize_trace,
 )
+from drive_cycles.vehicle_config_calibration import (
+    CalibrationParameters,
+    backup_and_activate_yaml,
+    load_calibration_parameters,
+    write_calibrated_yaml,
+)
 
 
 RAW_HEADER = ["time_s", "v_mps", "grade_deg"]
@@ -315,6 +321,145 @@ class ValidationLab(tk.Tk):
             weight=1,
         )
 
+        calibration_frame = ttk.LabelFrame(
+            root,
+            text="Vehicle energy calibration parameters",
+            padding=10,
+        )
+        calibration_frame.pack(
+            fill="x",
+            pady=(12, 0),
+        )
+
+        self.calibration_vars = {
+            "crr": tk.StringVar(),
+            "drive_eff": tk.StringVar(),
+            "regen_eff": tk.StringVar(),
+            "base_aux_w": tk.StringVar(),
+        }
+
+        calibration_fields = [
+            (
+                "Rolling resistance Crr",
+                "crr",
+                "Typical model input; higher = more tire loss.",
+            ),
+            (
+                "Drivetrain efficiency",
+                "drive_eff",
+                "Battery/DC to wheel efficiency during propulsion.",
+            ),
+            (
+                "Regenerative efficiency",
+                "regen_eff",
+                "Wheel braking energy converted back to DC energy.",
+            ),
+            (
+                "Base auxiliary power (W)",
+                "base_aux_w",
+                "Always-on battery-side electrical load.",
+            ),
+        ]
+
+        for row_index, (
+            label_text,
+            key,
+            help_text,
+        ) in enumerate(calibration_fields):
+            ttk.Label(
+                calibration_frame,
+                text=label_text + ":",
+            ).grid(
+                row=row_index,
+                column=0,
+                sticky="w",
+                pady=2,
+            )
+
+            ttk.Entry(
+                calibration_frame,
+                textvariable=self.calibration_vars[key],
+                width=14,
+            ).grid(
+                row=row_index,
+                column=1,
+                sticky="w",
+                padx=(8, 12),
+                pady=2,
+            )
+
+            ttk.Label(
+                calibration_frame,
+                text=help_text,
+                foreground="#666666",
+            ).grid(
+                row=row_index,
+                column=2,
+                sticky="w",
+                pady=2,
+            )
+
+        button_row = ttk.Frame(
+            calibration_frame
+        )
+        button_row.grid(
+            row=0,
+            column=3,
+            rowspan=4,
+            sticky="ns",
+            padx=(18, 0),
+        )
+
+        ttk.Button(
+            button_row,
+            text="Reload current YAML",
+            command=self._load_calibration_editor,
+        ).pack(
+            fill="x",
+            pady=(0, 6),
+        )
+
+        ttk.Button(
+            button_row,
+            text="Test edited values",
+            command=self._test_edited_wltc_values,
+        ).pack(
+            fill="x",
+            pady=6,
+        )
+
+        ttk.Button(
+            button_row,
+            text="Export / make active",
+            command=self._export_calibrated_yaml,
+        ).pack(
+            fill="x",
+            pady=6,
+        )
+
+        ttk.Label(
+            calibration_frame,
+            text=(
+                "Testing uses a temporary YAML. Exporting first backs up "
+                "the active YAML into car_configs/old/ with a timestamp."
+            ),
+            foreground="#555555",
+            wraplength=900,
+        ).grid(
+            row=4,
+            column=0,
+            columnspan=4,
+            sticky="w",
+            pady=(8, 0),
+        )
+
+        calibration_frame.columnconfigure(
+            2,
+            weight=1,
+        )
+
+        self._load_calibration_editor()
+
         results_frame = ttk.LabelFrame(
             root,
             text="WLTC Class 3 result",
@@ -351,6 +496,144 @@ class ValidationLab(tk.Tk):
         ).pack(
             fill="x",
             pady=(8, 0),
+        )
+
+    def _load_calibration_editor(self) -> None:
+        try:
+            params = load_calibration_parameters(
+                self.vehicle_config
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Vehicle calibration",
+                f"Could not read the active YAML:\n\n{exc}",
+            )
+            return
+
+        self.calibration_vars["crr"].set(
+            f"{params.rolling_resistance_coefficient:.6f}"
+        )
+        self.calibration_vars["drive_eff"].set(
+            f"{params.drivetrain_efficiency:.6f}"
+        )
+        self.calibration_vars["regen_eff"].set(
+            f"{params.regenerative_efficiency:.6f}"
+        )
+        self.calibration_vars["base_aux_w"].set(
+            f"{params.base_auxiliary_power_w:.1f}"
+        )
+
+    def _calibration_parameters_from_editor(
+        self,
+    ) -> CalibrationParameters:
+        try:
+            return CalibrationParameters(
+                rolling_resistance_coefficient=float(
+                    self.calibration_vars["crr"].get()
+                ),
+                drivetrain_efficiency=float(
+                    self.calibration_vars["drive_eff"].get()
+                ),
+                regenerative_efficiency=float(
+                    self.calibration_vars["regen_eff"].get()
+                ),
+                base_auxiliary_power_w=float(
+                    self.calibration_vars["base_aux_w"].get()
+                ),
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "All four calibration fields must contain valid numbers."
+            ) from exc
+
+    def _temporary_calibration_yaml_path(
+        self,
+    ) -> Path:
+        return (
+            self.export_dir
+            / "wltc"
+            / "temporary_calibration_vehicle.yaml"
+        )
+
+    def _test_edited_wltc_values(self) -> None:
+        trace_path = Path(
+            self.wltc_trace_var.get()
+        )
+
+        if not trace_path.is_file():
+            messagebox.showinfo(
+                "WLTC Class 3",
+                "Prepare or select the official Class 3 trace CSV first.",
+            )
+            return
+
+        try:
+            params = self._calibration_parameters_from_editor()
+            temporary_yaml = write_calibrated_yaml(
+                self.vehicle_config,
+                self._temporary_calibration_yaml_path(),
+                params,
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Calibration values",
+                str(exc),
+            )
+            return
+
+        self._run_wltc_validation_with_config(
+            temporary_yaml,
+            config_label="TEMPORARY EDITED VALUES",
+        )
+
+    def _export_calibrated_yaml(self) -> None:
+        try:
+            params = self._calibration_parameters_from_editor()
+        except Exception as exc:
+            messagebox.showerror(
+                "Calibration values",
+                str(exc),
+            )
+            return
+
+        confirmation = messagebox.askyesno(
+            "Export calibrated vehicle YAML",
+            (
+                "This will make the edited values active.\n\n"
+                f"Active file:\n{self.vehicle_config}\n\n"
+                "The current file will first be copied into an 'old' "
+                "folder with a timestamp.\n\n"
+                "Continue?"
+            ),
+        )
+
+        if not confirmation:
+            return
+
+        try:
+            backup_path, active_path = backup_and_activate_yaml(
+                self.vehicle_config,
+                params,
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "YAML export failed",
+                str(exc),
+            )
+            return
+
+        self._load_calibration_editor()
+
+        self.wltc_status_var.set(
+            f"New active YAML saved; backup: {backup_path.name}"
+        )
+
+        messagebox.showinfo(
+            "Vehicle YAML updated",
+            (
+                f"New active YAML:\n{active_path}\n\n"
+                f"Previous YAML archived as:\n{backup_path}"
+            ),
         )
 
     def _browse_wltc_workbook(self) -> None:
@@ -465,6 +748,17 @@ class ValidationLab(tk.Tk):
         )
 
     def _run_wltc_validation(self) -> None:
+        self._run_wltc_validation_with_config(
+            self.vehicle_config,
+            config_label="ACTIVE YAML",
+        )
+
+    def _run_wltc_validation_with_config(
+        self,
+        config_path: Path,
+        *,
+        config_label: str,
+    ) -> None:
         trace_path = Path(
             self.wltc_trace_var.get()
         )
@@ -477,14 +771,14 @@ class ValidationLab(tk.Tk):
             return
 
         self.wltc_status_var.set(
-            "Running prescribed-speed WLTC Class 3 vehicle model..."
+            f"Running WLTC with {config_label.lower()}..."
         )
         self.update_idletasks()
 
         try:
             result = run_wltc_validation(
                 trace_path,
-                self.vehicle_config,
+                config_path,
             )
         except Exception as exc:
             messagebox.showerror(
@@ -505,7 +799,8 @@ class ValidationLab(tk.Tk):
             "  Road grade:       0.0 deg",
             "  Traffic:          disabled",
             "  Route elevation:  disabled",
-            "  Vehicle config:   " + self.vehicle_config.name,
+            "  Config mode:      " + config_label,
+            "  Vehicle config:   " + Path(config_path).name,
             "",
             "TRACE VERIFICATION",
             f"  Samples:          {result.trace.sample_count}",
