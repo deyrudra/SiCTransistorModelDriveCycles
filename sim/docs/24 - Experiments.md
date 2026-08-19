@@ -186,8 +186,12 @@ Relative damage              5.775e-03       4.386e-03      -24.1%
 **Experiment 8**
 ![image-20260819182537719](./assets/image-20260819182537719.png)
 
-- Fastest:
-- Lowest Energy: 
-- Lowest Damage:
-- Balanced: 
+- Fastest: `exp08_route_ranking_candidate_01_20260819_182400_veh201039`
+- Lowest Energy: `exp08_route_ranking_candidate_04_20260819_182401_veh204039`
+- Lowest Damage: `exp08_route_ranking_candidate_02_20260819_182358_veh202039`
+- Balanced: `exp08_route_ranking_candidate_03_20260819_182358_veh203039`
+
+
+
+
 
