@@ -860,6 +860,9 @@ def _scenario(
     traffic_count: int,
     random_seed: int,
     fixed_dt_s: float = 0.05,
+    route_traffic_fraction: float = 0.25,
+    route_traffic_min_speed_factor: float = 0.45,
+    route_traffic_max_speed_factor: float = 0.85,
 ):
     worker_elevation_cache = (
         _worker_elevation_cache_path(
@@ -902,6 +905,15 @@ def _scenario(
         traffic_speed_factor=1.0,
         random_seed=int(
             random_seed
+        ),
+        route_traffic_fraction=float(
+            route_traffic_fraction
+        ),
+        route_traffic_min_speed_factor=float(
+            route_traffic_min_speed_factor
+        ),
+        route_traffic_max_speed_factor=float(
+            route_traffic_max_speed_factor
         ),
     )
 
@@ -1500,6 +1512,9 @@ def generate_pair_experiment(
                     random_seed=int(
                         seed
                     ),
+                    route_traffic_fraction=1.0,
+                    route_traffic_min_speed_factor=0.45,
+                    route_traffic_max_speed_factor=0.85,
                 )
             )
 
@@ -1520,6 +1535,9 @@ def generate_pair_experiment(
                     random_seed=int(
                         seed
                     ),
+                    route_traffic_fraction=1.0,
+                    route_traffic_min_speed_factor=0.45,
+                    route_traffic_max_speed_factor=0.85,
                 )
             )
 

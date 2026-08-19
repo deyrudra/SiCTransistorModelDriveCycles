@@ -65,6 +65,18 @@ class FastRouteScenario:
     traffic_speed_factor: float = 1.0
     random_seed: int = 7
 
+    # Fraction of spawned traffic that is constrained to the ego corridor.
+    # Experiment 6 sets this to 1.0 so the traffic condition is guaranteed to
+    # affect the road being measured. Other experiments can retain ambient
+    # network traffic by using the lower default.
+    route_traffic_fraction: float = 0.25
+
+    # Persistent desired-speed spread for route-coupled traffic. These factors
+    # multiply the posted speed limit and create slower leaders/queues instead
+    # of letting every background car converge to free-flow speed.
+    route_traffic_min_speed_factor: float = 0.45
+    route_traffic_max_speed_factor: float = 0.85
+
 
 @dataclass(frozen=True)
 class FastRouteResult:
@@ -523,17 +535,106 @@ def _refresh_signal_cache(
     simulation._signal_state_cache = cache
 
 
+
+class RouteFollowingTrafficVehicle(Vehicle):
+    """Background vehicle constrained to a prescribed route corridor.
+
+    Each route vehicle carries a persistent desired-speed factor. This is
+    important for congestion: without heterogeneous desired speeds, all cars
+    eventually converge to the speed limit and the ego rarely encounters a
+    sustained queue.
+    """
+
+    def __init__(
+        self,
+        vehicle_id,
+        route_segments,
+        start_route_index,
+        network,
+        simulation,
+        *,
+        desired_speed_factor=1.0,
+    ):
+        route_segments = tuple(route_segments)
+        if not route_segments:
+            raise ValueError("RouteFollowingTrafficVehicle needs route segments.")
+        self.route_segments = route_segments
+        self.route_index = max(0, min(int(start_route_index), len(route_segments) - 1))
+        self.finished = False
+        self.desired_speed_factor = max(0.20, min(1.0, float(desired_speed_factor)))
+        super().__init__(vehicle_id, route_segments[self.route_index], network, simulation)
+
+    def get_target_speed(self):
+        # Keep the parent class's traffic-light and vehicle-ahead logic, then
+        # cap free-flow speed by this driver's persistent speed preference.
+        target = super().get_target_speed()
+        if self.segment is None:
+            return 0.0
+        posted = self.segment.speed_limit or 10.0
+        preferred = posted * self.desired_speed_factor
+        return min(target, preferred)
+
+    def update(self, dt):
+        if self.finished or self.segment is None:
+            return
+        self.update_speed(dt)
+        self.position += self.speed * dt
+
+        while self.position >= self.segment.length:
+            light_state = self.get_traffic_light_state()
+            if light_state in ("red", "yellow"):
+                self.position = max(0.0, self.segment.length - 0.1)
+                self.speed = 0.0
+                return
+
+            self.position -= self.segment.length
+            self.route_index += 1
+
+            if self.route_index >= len(self.route_segments):
+                self.speed = 0.0
+                self.position = 0.0
+                self.segment = None
+                self.finished = True
+                return
+
+            self.segment = self.route_segments[self.route_index]
+
+
+def _route_position_to_segment(route_segments, distance_m):
+    """Map longitudinal distance along a route to (segment index, position)."""
+    remaining = max(0.0, float(distance_m))
+    for index, segment in enumerate(route_segments):
+        length = max(0.0, float(segment.length))
+        if remaining <= length or index == len(route_segments) - 1:
+            return index, min(remaining, max(0.0, length - 0.1))
+        remaining -= length
+    return len(route_segments) - 1, 0.0
+
+
 def _spawn_background_vehicles(
     network: RoadNetwork,
     simulation: Simulation,
     count: int,
     random_seed: int,
-) -> None:
-    rng = random.Random(
-        random_seed
-    )
+    route: Route | None = None,
+    route_fraction: float = 0.25,
+    min_route_speed_factor: float = 0.45,
+    max_route_speed_factor: float = 0.85,
+) -> tuple[int, float]:
+    """Spawn route-coupled traffic plus ambient network traffic.
 
-    candidates = [
+    Route vehicles are distributed by physical distance along the corridor, not
+    by OSM segment count. This prevents short OSM segments from being
+    overrepresented and produces a controlled corridor density.
+
+    Returns (route_coupled_count, route_density_veh_per_km).
+    """
+    rng = random.Random(random_seed)
+    requested = max(0, int(count))
+    if requested <= 0:
+        return 0, 0.0
+
+    all_candidates = [
         segment
         for segment in network.segments
         if (
@@ -542,49 +643,60 @@ def _spawn_background_vehicles(
             and segment.v in network.nodes
         )
     ]
+    if not all_candidates:
+        return 0, 0.0
 
-    if not candidates:
-        return
+    route_segments = tuple(route.segments) if route is not None else ()
+    route_length_m = sum(max(0.0, float(seg.length)) for seg in route_segments)
 
-    next_id = 0
+    fraction = max(0.0, min(1.0, float(route_fraction)))
+    route_count = int(round(requested * fraction)) if route_segments else 0
+    route_count = max(0, min(requested, route_count))
+    ambient_count = requested - route_count
 
-    for offset in range(
-        max(
-            0,
-            int(count),
+    min_factor = max(0.20, min(1.0, float(min_route_speed_factor)))
+    max_factor = max(min_factor, min(1.0, float(max_route_speed_factor)))
+
+    # Stratified placement: divide the route into equal-length bins and jitter
+    # one vehicle inside each bin. Seed changes positions/speeds but density is
+    # controlled and reproducible.
+    for offset in range(route_count):
+        if route_length_m <= 0.0:
+            break
+        bin_start = route_length_m * offset / route_count
+        bin_end = route_length_m * (offset + 1) / route_count
+        longitudinal = rng.uniform(bin_start, bin_end)
+        route_index, position = _route_position_to_segment(route_segments, longitudinal)
+        factor = rng.uniform(min_factor, max_factor)
+        vehicle = RouteFollowingTrafficVehicle(
+            offset,
+            route_segments,
+            route_index,
+            network,
+            simulation,
+            desired_speed_factor=factor,
         )
-    ):
-        segment = rng.choice(
-            candidates
-        )
+        vehicle.position = position
+        posted = vehicle.segment.speed_limit or 10.0
+        vehicle.speed = rng.uniform(0.35, 0.90) * posted * factor
+        # Slightly larger microscopic gap than the original 5 m model.
+        vehicle.safe_distance = rng.uniform(7.0, 12.0)
+        simulation.add_vehicle(vehicle)
 
+    for offset in range(ambient_count):
+        segment = rng.choice(all_candidates)
         vehicle = Vehicle(
-            next_id + offset,
+            route_count + offset,
             segment,
             network,
             simulation,
         )
+        vehicle.position = rng.uniform(0.0, max(0.0, segment.length - 0.1))
+        vehicle.speed = rng.uniform(0.0, min(segment.speed_limit or 10.0, 8.0))
+        simulation.add_vehicle(vehicle)
 
-        vehicle.position = rng.uniform(
-            0.0,
-            max(
-                0.0,
-                segment.length - 0.1,
-            ),
-        )
-
-        vehicle.speed = rng.uniform(
-            0.0,
-            min(
-                segment.speed_limit
-                or 10.0,
-                8.0,
-            ),
-        )
-
-        simulation.add_vehicle(
-            vehicle
-        )
+    density = (1000.0 * route_count / route_length_m) if route_length_m > 0.0 else 0.0
+    return route_count, density
 
 
 def _grade_for_ego(
@@ -647,11 +759,18 @@ def run_fast_route_scenario(
         simulation._vehicle_frame_index = frame_index
         simulation._signal_state_cache = {}
 
-        _spawn_background_vehicles(
+        (
+            route_coupled_traffic_count,
+            route_traffic_density_veh_per_km,
+        ) = _spawn_background_vehicles(
             network,
             simulation,
             scenario.background_vehicle_count,
             scenario.random_seed,
+            route=route,
+            route_fraction=scenario.route_traffic_fraction,
+            min_route_speed_factor=scenario.route_traffic_min_speed_factor,
+            max_route_speed_factor=scenario.route_traffic_max_speed_factor,
         )
 
         vehicle_config = load_vehicle_config(
@@ -846,6 +965,12 @@ def run_fast_route_scenario(
                 "route_index": scenario.route_index,
                 "route_candidate_index": scenario.route_index,
                 "traffic_speed_factor": scenario.traffic_speed_factor,
+                "background_vehicle_count": scenario.background_vehicle_count,
+                "route_coupled_traffic_count": route_coupled_traffic_count,
+                "route_traffic_density_veh_per_km": route_traffic_density_veh_per_km,
+                "route_traffic_fraction": scenario.route_traffic_fraction,
+                "route_traffic_min_speed_factor": scenario.route_traffic_min_speed_factor,
+                "route_traffic_max_speed_factor": scenario.route_traffic_max_speed_factor,
                 "vehicle_config": vehicle_config.name,
                 "random_seed": scenario.random_seed,
                 **endpoint_metadata,
