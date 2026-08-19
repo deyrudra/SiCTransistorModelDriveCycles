@@ -26,6 +26,7 @@ Validation Plan:
 Based off Wolfspeed's Power Cycling and Lifetime Modeling Approach, our model will follow the same process.
 
 - https://assets.wolfspeed.com/uploads/2025/11/Wolfspeed_Power_Cycling_and_Lifetime_Modeling_Approach.pdf
+- https://assets.wolfspeed.com/uploads/2025/02/Wolfspeed_CAB525F12XM3_data_sheet.pdf
 - electro-thermal junction-temperature history → rainflow counting → stress evaluation using **ΔTj, Tj,max, and cycle duration** → cumulative Miner damage. 
 
 
