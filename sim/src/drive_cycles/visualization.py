@@ -822,6 +822,7 @@ class TrafficVisualizer:
         # Tkinter and Pygame event loops never block one another.
         self.mission_lab_process = None
         self.validation_lab_process = None
+        self.experiment_lab_process = None
         self.address_searcher = default_stuttgart_searcher(PROJECT_ROOT)
         self.address_executor = ThreadPoolExecutor(
             max_workers=1,
@@ -931,6 +932,8 @@ class TrafficVisualizer:
                     self.launch_mission_profile_lab()
                 elif event.key == pygame.K_F7:
                     self.launch_validation_lab()
+                elif event.key == pygame.K_F8:
+                    self.launch_experiment_lab()
                 elif (
                     pygame.K_1 <= event.key <= pygame.K_5
                     and self.candidate_routes
@@ -1235,6 +1238,60 @@ class TrafficVisualizer:
             self.validation_lab_process = None
             self.route_status = (
                 f"Validation Lab launch failed: {exc}"
+            )
+
+
+    def launch_experiment_lab(self) -> None:
+        if (
+            self.experiment_lab_process is not None
+            and self.experiment_lab_process.poll() is None
+        ):
+            self.route_status = "Route Experiment Lab is already open"
+            return
+
+        window_module = (
+            PROJECT_ROOT
+            / "src"
+            / "drive_cycles"
+            / "experiment_lab_window.py"
+        )
+
+        if not window_module.is_file():
+            self.route_status = (
+                "Route Experiment Lab missing: "
+                f"{window_module.name}"
+            )
+            return
+
+        DEFAULT_RESEARCH_EXPORT_DIR.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        command = [
+            sys.executable,
+            str(window_module),
+            "--cycles-dir",
+            str(DEFAULT_DRIVE_CYCLE_DIR),
+            "--vehicle-config",
+            str(DEFAULT_CAR_CONFIG),
+            "--export-dir",
+            str(DEFAULT_RESEARCH_EXPORT_DIR),
+        ]
+
+        try:
+            self.experiment_lab_process = subprocess.Popen(
+                command,
+                cwd=str(PROJECT_ROOT),
+            )
+
+            self.route_status = (
+                "Route Experiment Lab opened - F8"
+            )
+        except Exception as exc:
+            self.experiment_lab_process = None
+            self.route_status = (
+                f"Route Experiment Lab launch failed: {exc}"
             )
 
 

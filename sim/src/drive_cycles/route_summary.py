@@ -127,6 +127,10 @@ def analyze_route_summary(
 
     rainflow = analyze_temperature_history(
         temperatures,
+        times_s=[
+            sample.time_s
+            for sample in thermal.samples
+        ],
         source_cycle=thermal.source_cycle,
     )
 
